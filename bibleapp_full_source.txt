@@ -1,0 +1,3765 @@
+================================================================================
+Программа по изучению БИБЛИИ — полный исходный код
+Версия: 1.2.5
+================================================================================
+
+
+################################################################################
+# FILE: CMakeLists.txt
+################################################################################
+
+cmake_minimum_required(VERSION 3.16)
+project(BibleApp VERSION 0.2.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Sql)
+
+set(SOURCES
+    src/main.cpp
+    src/MainWindow.cpp
+    src/TitleBar.cpp
+    src/Module.cpp
+    src/ModuleManager.cpp
+    src/Converter.cpp
+    src/BibleView.cpp
+    src/ModuleManagerDialog.cpp
+)
+
+set(HEADERS
+    src/MainWindow.h
+    src/TitleBar.h
+    src/Module.h
+    src/ModuleManager.h
+    src/Converter.h
+    src/BibleView.h
+    src/ModuleManagerDialog.h
+)
+
+qt6_add_resources(BIBLEAPP_RES resources/icons.qrc)
+add_executable(bibleapp ${SOURCES} ${HEADERS} ${BIBLEAPP_RES})
+
+target_link_libraries(bibleapp
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::PrintSupport
+    Qt6::Sql
+)
+
+install(TARGETS bibleapp DESTINATION bin)
+
+
+################################################################################
+# FILE: src/main.cpp
+################################################################################
+
+#include <QApplication>
+#include <QLocale>
+#include <QSqlDatabase>
+#include <QMessageBox>
+#include "MainWindow.h"
+#include <QIcon>
+
+int main(int argc, char *argv[])
+{
+    QApplication app(argc, argv);
+    QApplication::setApplicationName(QString::fromUtf8("Программа по изучению БИБЛИИ"));
+    QApplication::setApplicationVersion("0.3.2");
+    QApplication::setOrganizationName("BibleApp");
+    QLocale::setDefault(QLocale(QLocale::Russian, QLocale::Russia));
+
+    if (!QSqlDatabase::isDriverAvailable("QSQLITE")) {
+        QMessageBox::critical(nullptr,
+            QString::fromUtf8("Ошибка"),
+            QString::fromUtf8(
+                "Не найден драйвер SQLite.\n\n"
+                "Выполните в терминале:\n"
+                "sudo apt install libqt6sql6-sqlite"));
+        return 1;
+    }
+
+    MainWindow window;
+    window.setWindowIcon(QIcon(":/bibleapp.png"));
+    window.show();
+    return app.exec();
+}
+
+
+################################################################################
+# FILE: src/MainWindow.h
+################################################################################
+
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+#include <QSettings>
+#include "ModuleManager.h"
+
+class QLabel;
+class QPushButton;
+class QSplitter;
+class BibleView;
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+protected:
+    void changeEvent(QEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
+
+private slots:
+    void onMinimize();
+    void onMaximize();
+    void onClose();
+    void onControlsPositionChanged(int index);
+    void openModuleManagerFor(BibleView *view);
+    void rebindViewsFromSettings();
+    void onModuleSelected(Module *module);
+    void applySystemTheme();
+
+private:
+    void setupUi();
+    void loadSettings();
+    void saveSettings();
+
+    QWidget *m_centralRoot = nullptr;
+    QSplitter *m_splitter = nullptr;
+    BibleView *m_viewLeft = nullptr;
+    BibleView *m_viewRight = nullptr;
+    QLabel *m_statusLabel = nullptr;
+    QPushButton *m_modulesButton = nullptr;
+
+    ModuleManager m_moduleManager;
+    BibleView *m_pendingView = nullptr;
+};
+
+#endif
+
+
+################################################################################
+# FILE: src/MainWindow.cpp
+################################################################################
+
+#include "MainWindow.h"
+#include "BibleView.h"
+#include "ModuleManagerDialog.h"
+
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QStatusBar>
+#include <QApplication>
+#include <QCloseEvent>
+#include <QSettings>
+#include <QSplitter>
+#include <QMenuBar>
+#include <QMenu>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+{
+    // Обычное системное окно — стабильно на Mint/Cinnamon/Wayland
+    setMinimumSize(1000, 650);
+    resize(1280, 800);
+    setWindowTitle(QString::fromUtf8("Программа по изучению БИБЛИИ"));
+
+    setupUi();
+    loadSettings();
+
+    m_moduleManager.ensureTestModule();
+    m_moduleManager.loadModules();
+
+    // Восстановить модули в двух окнах
+    QSettings settings("BibleApp", "BibleApp");
+    auto restoreView = [this, &settings](BibleView *view, const QString &keyPrefix, bool fallbackFirst) {
+        if (!view) return;
+        const QString modName = settings.value(keyPrefix + "/module").toString();
+        Module *mod = nullptr;
+        if (!modName.isEmpty())
+            mod = m_moduleManager.moduleByName(modName);
+        if (!mod && fallbackFirst && !m_moduleManager.modules().isEmpty())
+            mod = m_moduleManager.moduleAt(0);
+        if (mod) {
+            view->setModule(mod);
+            int book = settings.value(keyPrefix + "/book", 0).toInt();
+            int chapter = settings.value(keyPrefix + "/chapter", 1).toInt();
+            if (book > 0)
+                view->goTo(book, qMax(1, chapter), 1);
+        }
+    };
+    restoreView(m_viewLeft, "panel/left", true);
+    restoreView(m_viewRight, "panel/right", false);
+
+    if (m_statusLabel && m_viewLeft && m_viewLeft->module())
+        m_statusLabel->setText(QString::fromUtf8("Загружен модуль: %1")
+                                   .arg(m_viewLeft->module()->name()));
+}
+
+MainWindow::~MainWindow()
+{
+    saveSettings();
+}
+
+void MainWindow::setupUi()
+{
+    // Меню
+    auto *menuModules = menuBar()->addMenu(QString::fromUtf8("Модули"));
+    auto *actManager = menuModules->addAction(QString::fromUtf8("Менеджер модулей…"));
+    connect(actManager, &QAction::triggered, this, [this]() {
+        openModuleManagerFor(m_viewLeft);
+    });
+
+    auto *menuHelp = menuBar()->addMenu(QString::fromUtf8("Справка"));
+    menuHelp->addAction(QString::fromUtf8("О программе"), this, [this]() {
+        // просто в статус
+        if (m_statusLabel)
+            m_statusLabel->setText(QString::fromUtf8("Программа по изучению БИБЛИИ, версия 0.3.2"));
+    });
+
+    m_centralRoot = new QWidget(this);
+    setCentralWidget(m_centralRoot);
+
+    auto *rootLayout = new QVBoxLayout(m_centralRoot);
+    rootLayout->setContentsMargins(6, 6, 6, 6);
+    rootLayout->setSpacing(6);
+
+    // Панель инструментов
+    auto *toolbar = new QWidget(m_centralRoot);
+    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_modulesButton = new QPushButton(QString::fromUtf8("Менеджер модулей…"), toolbar);
+    toolbarLayout->addWidget(m_modulesButton);
+    connect(m_modulesButton, &QPushButton::clicked, this, [this]() {
+        openModuleManagerFor(m_viewLeft);
+    });
+
+    toolbarLayout->addStretch();
+    rootLayout->addWidget(toolbar);
+
+    // Два окна модулей
+    m_splitter = new QSplitter(Qt::Horizontal, m_centralRoot);
+    m_viewLeft = new BibleView(m_splitter);
+    m_viewLeft->setObjectName(QStringLiteral("panelLeft"));
+    m_viewRight = new BibleView(m_splitter);
+    m_viewRight->setObjectName(QStringLiteral("panelRight"));
+    m_splitter->addWidget(m_viewLeft);
+    m_splitter->addWidget(m_viewRight);
+    m_splitter->setStretchFactor(0, 1);
+    m_splitter->setStretchFactor(1, 1);
+    rootLayout->addWidget(m_splitter, 1);
+
+    connect(m_viewLeft, &BibleView::requestLoadModule, this, [this]() {
+        openModuleManagerFor(m_viewLeft);
+    });
+    connect(m_viewRight, &BibleView::requestLoadModule, this, [this]() {
+        openModuleManagerFor(m_viewRight);
+    });
+
+    m_statusLabel = new QLabel(QString::fromUtf8("Готово"), this);
+    statusBar()->addWidget(m_statusLabel);
+}
+
+void MainWindow::rebindViewsFromSettings()
+{
+    QSettings settings("BibleApp", "BibleApp");
+    auto bind = [this, &settings](BibleView *view, const QString &keyPrefix) {
+        if (!view)
+            return;
+        const QString name = settings.value(keyPrefix + "/module").toString();
+        Module *mod = name.isEmpty() ? nullptr : m_moduleManager.moduleByName(name);
+        // Если тот же модуль (по имени) уже открыт — не сбрасывать текст
+        if (view->module() && mod && view->module()->name() == mod->name()) {
+            // указатель мог устареть после loadModules — обновить
+            view->setModule(mod);
+            int book = settings.value(keyPrefix + "/book", 0).toInt();
+            int chapter = settings.value(keyPrefix + "/chapter", 1).toInt();
+            if (book > 0)
+                view->goTo(book, qMax(1, chapter), 1);
+            return;
+        }
+        view->setModule(mod);
+        if (mod) {
+            int book = settings.value(keyPrefix + "/book", 0).toInt();
+            int chapter = settings.value(keyPrefix + "/chapter", 1).toInt();
+            if (book > 0)
+                view->goTo(book, qMax(1, chapter), 1);
+        }
+    };
+    bind(m_viewLeft, "panel/left");
+    bind(m_viewRight, "panel/right");
+}
+
+void MainWindow::openModuleManagerFor(BibleView *view)
+{
+    if (!view)
+        return;
+
+    // Запомнить состояние обеих панелей (имя/книга/глава)
+    saveSettings();
+
+    const QString leftName = m_viewLeft && m_viewLeft->module() ? m_viewLeft->module()->name() : QString();
+    const int leftBook = m_viewLeft ? m_viewLeft->currentBook() : 0;
+    const int leftChapter = m_viewLeft ? m_viewLeft->currentChapter() : 1;
+    const QString rightName = m_viewRight && m_viewRight->module() ? m_viewRight->module()->name() : QString();
+    const int rightBook = m_viewRight ? m_viewRight->currentBook() : 0;
+    const int rightChapter = m_viewRight ? m_viewRight->currentChapter() : 1;
+
+    m_pendingView = view;
+
+    const QString currentName = (view && view->module()) ? view->module()->name() : QString();
+    ModuleManagerDialog dlg(&m_moduleManager, this, currentName);
+    connect(&dlg, &ModuleManagerDialog::moduleSelected, this, [this, view](Module *module) {
+        if (!module || !view)
+            return;
+        // Меняем модуль ТОЛЬКО в том окне, откуда вызвали
+        view->setModule(module);
+        QSettings settings(QStringLiteral("BibleApp"), QStringLiteral("BibleApp"));
+        const bool right = (view == m_viewRight);
+        const QString key = right ? QStringLiteral("panel/right") : QStringLiteral("panel/left");
+        settings.setValue(key + QStringLiteral("/module"), module->name());
+        settings.setValue(key + QStringLiteral("/book"), view->currentBook());
+        settings.setValue(key + QStringLiteral("/chapter"), view->currentChapter());
+        if (m_statusLabel)
+            m_statusLabel->setText(QString::fromUtf8("Загружен модуль: %1").arg(module->name()));
+    });
+    dlg.exec();
+    m_pendingView = nullptr;
+
+    // На всякий случай: если другое окно вдруг опустело — восстановить
+    if (m_viewLeft && !m_viewLeft->module() && !leftName.isEmpty()) {
+        if (Module *m = m_moduleManager.moduleByName(leftName)) {
+            m_viewLeft->setModule(m);
+            if (leftBook > 0)
+                m_viewLeft->goTo(leftBook, qMax(1, leftChapter), 1);
+        }
+    }
+    if (m_viewRight && !m_viewRight->module() && !rightName.isEmpty()) {
+        if (Module *m = m_moduleManager.moduleByName(rightName)) {
+            m_viewRight->setModule(m);
+            if (rightBook > 0)
+                m_viewRight->goTo(rightBook, qMax(1, rightChapter), 1);
+        }
+    }
+}
+
+void MainWindow::onModuleSelected(Module *module)
+{
+    Q_UNUSED(module);
+    // Обработка выбора выполняется лямбдой в openModuleManagerFor
+}
+
+void MainWindow::loadSettings()
+{
+    QSettings settings("BibleApp", "BibleApp");
+    if (settings.contains("window/geometry"))
+        restoreGeometry(settings.value("window/geometry").toByteArray());
+    if (settings.contains("window/state"))
+        restoreState(settings.value("window/state").toByteArray());
+    if (m_splitter && settings.contains("ui/splitter"))
+        m_splitter->restoreState(settings.value("ui/splitter").toByteArray());
+
+    // Размер шрифта панелей (если виды уже созданы)
+    if (m_viewLeft) {
+        int fs = settings.value(QStringLiteral("panel/left/fontSize"), 13).toInt();
+        m_viewLeft->setFontSize(fs);
+    }
+    if (m_viewRight) {
+        int fs = settings.value(QStringLiteral("panel/right/fontSize"), 13).toInt();
+        m_viewRight->setFontSize(fs);
+    }
+}
+
+void MainWindow::saveSettings()
+{
+    QSettings settings("BibleApp", "BibleApp");
+    settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    settings.setValue(QStringLiteral("window/state"), saveState());
+    if (m_splitter)
+        settings.setValue(QStringLiteral("ui/splitter"), m_splitter->saveState());
+
+    auto saveView = [&settings](BibleView *view, const QString &keyPrefix) {
+        if (!view)
+            return;
+        settings.setValue(keyPrefix + QStringLiteral("/fontSize"), view->fontSize());
+        if (!view->module()) {
+            // Не затираем модуль при промежуточных состояниях — только если явно пусто при выходе
+            return;
+        }
+        settings.setValue(keyPrefix + QStringLiteral("/module"), view->module()->name());
+        settings.setValue(keyPrefix + QStringLiteral("/book"), view->currentBook());
+        settings.setValue(keyPrefix + QStringLiteral("/chapter"), view->currentChapter());
+    };
+    saveView(m_viewLeft, QStringLiteral("panel/left"));
+    saveView(m_viewRight, QStringLiteral("panel/right"));
+    settings.sync();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    saveSettings();
+    QMainWindow::closeEvent(event);
+}
+
+// Заглушки, чтобы линковалось со старым заголовком
+void MainWindow::onMinimize() {}
+void MainWindow::onMaximize() {}
+void MainWindow::onClose() { close(); }
+void MainWindow::onControlsPositionChanged(int) {}
+void MainWindow::applySystemTheme() {}
+void MainWindow::changeEvent(QEvent *event) { QMainWindow::changeEvent(event); }
+
+
+################################################################################
+# FILE: src/BibleView.h
+################################################################################
+
+#ifndef BIBLEVIEW_H
+#define BIBLEVIEW_H
+
+#include <QWidget>
+#include "Module.h"
+
+class QComboBox;
+class QTextBrowser;
+class QLabel;
+class QPushButton;
+class QLineEdit;
+class QListWidget;
+
+class BibleView : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit BibleView(QWidget *parent = nullptr);
+
+    void setModule(Module *module);
+    Module* module() const { return m_module; }
+    int currentBook() const { return m_currentBook; }
+    int currentChapter() const { return m_currentChapter; }
+
+    void setFontSize(int points);
+    int fontSize() const { return m_fontSize; }
+
+signals:
+    void requestLoadModule();
+    void verseChanged(int book, int chapter, int verse);
+
+public slots:
+    void goTo(int book, int chapter, int verse = 1);
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override;
+
+private slots:
+    void onBookChanged(int index);
+    void onChapterChanged(int chapter);
+    void onSearch();
+    void onSearchResultClicked();
+    void onFontBigger();
+    void onFontSmaller();
+    void onPrevChapter();
+    void onNextChapter();
+    void onAddBookmark();
+    void onBookmarkClicked();
+    void onRemoveBookmark();
+    void onAnchorClicked(const QUrl &url);
+
+private:
+    void loadChapter();
+    void applyTextStyle();
+    void showParallelForCurrent();
+    void loadBookmarks();
+    void saveBookmarks();
+    void refreshBookmarkList();
+    QString bookmarkKey() const;
+
+    Module *m_module = nullptr;
+    int m_fontSize = 13;
+    int m_currentBook = 0;
+    int m_currentChapter = 1;
+    int m_currentVerse = 1;
+
+    QComboBox *m_bookCombo = nullptr;
+    QComboBox *m_chapterCombo = nullptr;
+    QLabel *m_chapterLabel = nullptr;
+    QLabel *m_moduleLabel = nullptr;
+    QTextBrowser *m_textView = nullptr;
+    QPushButton *m_loadBtn = nullptr;
+    QPushButton *m_prevBtn = nullptr;
+    QPushButton *m_nextBtn = nullptr;
+    QLineEdit *m_searchEdit = nullptr;
+    QListWidget *m_searchResults = nullptr;
+    QListWidget *m_parallelList = nullptr;
+    QListWidget *m_bookmarkList = nullptr;
+    QLabel *m_fontLabel = nullptr;
+    QLabel *m_wordInfo = nullptr;
+};
+
+#endif
+
+
+################################################################################
+# FILE: src/BibleView.cpp
+################################################################################
+
+#include <QUrl>
+#include <QUrlQuery>
+#include "BibleView.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QComboBox>
+#include <QTextBrowser>
+#include <QLabel>
+#include <QPushButton>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QSplitter>
+#include <QHash>
+#include <QSettings>
+#include <QKeyEvent>
+#include <QTextCursor>
+#include <QMessageBox>
+
+static QStringList parallelRefs(int book, int chapter, int verse)
+{
+    QString key = QString("%1:%2:%3").arg(book).arg(chapter).arg(verse);
+    static QHash<QString, QStringList> map;
+    if (map.isEmpty()) {
+        map["1:1:1"] = {QString::fromUtf8("Ин 1:1–3"), QString::fromUtf8("Евр 11:3")};
+        map["1:1:3"] = {QString::fromUtf8("2 Кор 4:6")};
+        map["43:1:1"] = {QString::fromUtf8("Быт 1:1"), QString::fromUtf8("1 Ин 1:1–2")};
+        map["43:1:12"] = {QString::fromUtf8("Рим 8:14–16"), QString::fromUtf8("Гал 3:26")};
+        map["19:1:1"] = {QString::fromUtf8("Иер 17:7–8")};
+        map["19:1:3"] = {QString::fromUtf8("Иер 17:8")};
+    }
+    return map.value(key);
+}
+
+BibleView::BibleView(QWidget *parent)
+    : QWidget(parent)
+{
+    setFocusPolicy(Qt::StrongFocus);
+
+    auto *mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(6, 6, 6, 6);
+    mainLayout->setSpacing(4);
+
+    auto *topLayout = new QHBoxLayout;
+    m_moduleLabel = new QLabel(QString::fromUtf8("Модуль не выбран"), this);
+    m_moduleLabel->setStyleSheet("font-weight: 600;");
+    topLayout->addWidget(m_moduleLabel, 1);
+    m_loadBtn = new QPushButton(QString::fromUtf8("Выбрать модуль…"), this);
+    topLayout->addWidget(m_loadBtn);
+    connect(m_loadBtn, &QPushButton::clicked, this, &BibleView::requestLoadModule);
+    mainLayout->addLayout(topLayout);
+
+    // Навигация
+    auto *navLayout = new QHBoxLayout;
+    navLayout->addWidget(new QLabel(QString::fromUtf8("Книга:"), this));
+    m_bookCombo = new QComboBox(this);
+    m_bookCombo->setMinimumWidth(140);
+    navLayout->addWidget(m_bookCombo);
+
+    navLayout->addWidget(new QLabel(QString::fromUtf8("Глава:"), this));
+    m_chapterCombo = new QComboBox(this);
+    m_chapterCombo->setMinimumWidth(72);
+    m_chapterCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    navLayout->addWidget(m_chapterCombo);
+
+    m_prevBtn = new QPushButton(QString::fromUtf8("◀"), this);
+    m_prevBtn->setToolTip(QString::fromUtf8("Предыдущая глава (←)"));
+    m_prevBtn->setFixedSize(28, 28);
+    m_prevBtn->setMaximumWidth(28);
+    navLayout->addWidget(m_prevBtn);
+
+    m_nextBtn = new QPushButton(QString::fromUtf8("▶"), this);
+    m_nextBtn->setToolTip(QString::fromUtf8("Следующая глава (→)"));
+    m_nextBtn->setFixedSize(28, 28);
+    m_nextBtn->setMaximumWidth(28);
+    navLayout->addWidget(m_nextBtn);
+
+    m_chapterLabel = new QLabel(this);
+    navLayout->addWidget(m_chapterLabel);
+
+    navLayout->addSpacing(10);
+    auto *bmBtn = new QPushButton(QString::fromUtf8("★ В закладки"), this);
+    bmBtn->setToolTip(QString::fromUtf8("Добавить текущую главу в закладки"));
+    navLayout->addWidget(bmBtn);
+    connect(bmBtn, &QPushButton::clicked, this, &BibleView::onAddBookmark);
+
+    navLayout->addSpacing(8);
+    navLayout->addWidget(new QLabel(QString::fromUtf8("Шрифт:"), this));
+    auto *fontMinus = new QPushButton("A−", this);
+    fontMinus->setFixedWidth(36);
+    auto *fontPlus = new QPushButton("A+", this);
+    fontPlus->setFixedWidth(36);
+    m_fontLabel = new QLabel("13", this);
+    navLayout->addWidget(fontMinus);
+    navLayout->addWidget(m_fontLabel);
+    navLayout->addWidget(fontPlus);
+    connect(fontMinus, &QPushButton::clicked, this, &BibleView::onFontSmaller);
+    connect(fontPlus, &QPushButton::clicked, this, &BibleView::onFontBigger);
+
+    navLayout->addStretch();
+    mainLayout->addLayout(navLayout);
+
+    connect(m_prevBtn, &QPushButton::clicked, this, &BibleView::onPrevChapter);
+    connect(m_nextBtn, &QPushButton::clicked, this, &BibleView::onNextChapter);
+
+    // Поиск
+    auto *searchLayout = new QHBoxLayout;
+    m_searchEdit = new QLineEdit(this);
+    m_searchEdit->setPlaceholderText(QString::fromUtf8("Поиск по тексту модуля…"));
+    searchLayout->addWidget(m_searchEdit, 1);
+    auto *searchBtn = new QPushButton(QString::fromUtf8("Найти"), this);
+    searchLayout->addWidget(searchBtn);
+    connect(searchBtn, &QPushButton::clicked, this, &BibleView::onSearch);
+    connect(m_searchEdit, &QLineEdit::returnPressed, this, &BibleView::onSearch);
+    mainLayout->addLayout(searchLayout);
+
+    m_wordInfo = new QLabel(QString::fromUtf8("Наведите или нажмите на греческое слово — появится перевод"), this);
+    m_wordInfo->setWordWrap(true);
+    m_wordInfo->setMinimumHeight(70);
+    m_wordInfo->setTextFormat(Qt::RichText);
+    m_wordInfo->setStyleSheet("background:#eef4fa; color:#1a3a5a; padding:6px 10px; border-radius:4px; border:1px solid #c5d5e8;");
+    mainLayout->addWidget(m_wordInfo);
+
+
+    auto *splitter = new QSplitter(Qt::Horizontal, this);
+
+    m_textView = new QTextBrowser(this);
+    m_textView->setOpenLinks(false);
+    m_textView->setOpenExternalLinks(false);
+    connect(m_textView, &QTextBrowser::anchorClicked, this, &BibleView::onAnchorClicked);
+    m_textView->setReadOnly(true);
+    splitter->addWidget(m_textView);
+
+    auto *side = new QWidget(this);
+    auto *sideLayout = new QVBoxLayout(side);
+    sideLayout->setContentsMargins(0, 0, 0, 0);
+
+    sideLayout->addWidget(new QLabel(QString::fromUtf8("Закладки:"), side));
+    m_bookmarkList = new QListWidget(side);
+    m_bookmarkList->setMaximumHeight(140);
+    sideLayout->addWidget(m_bookmarkList);
+    connect(m_bookmarkList, &QListWidget::itemDoubleClicked, this, &BibleView::onBookmarkClicked);
+
+    auto *bmBtnRow = new QHBoxLayout;
+    auto *gotoBm = new QPushButton(QString::fromUtf8("Перейти"), side);
+    auto *delBm = new QPushButton(QString::fromUtf8("Удалить"), side);
+    bmBtnRow->addWidget(gotoBm);
+    bmBtnRow->addWidget(delBm);
+    sideLayout->addLayout(bmBtnRow);
+    connect(gotoBm, &QPushButton::clicked, this, &BibleView::onBookmarkClicked);
+    connect(delBm, &QPushButton::clicked, this, &BibleView::onRemoveBookmark);
+
+    sideLayout->addWidget(new QLabel(QString::fromUtf8("Результаты поиска:"), side));
+    m_searchResults = new QListWidget(side);
+    sideLayout->addWidget(m_searchResults, 1);
+    connect(m_searchResults, &QListWidget::itemClicked, this, &BibleView::onSearchResultClicked);
+
+    sideLayout->addWidget(new QLabel(QString::fromUtf8("Параллельные места:"), side));
+    m_parallelList = new QListWidget(side);
+    m_parallelList->setMaximumHeight(100);
+    sideLayout->addWidget(m_parallelList);
+
+    splitter->addWidget(side);
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 1);
+    mainLayout->addWidget(splitter, 1);
+
+    connect(m_bookCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &BibleView::onBookChanged);
+    connect(m_chapterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+                if (!m_chapterCombo || m_chapterCombo->currentData().isNull())
+                    return;
+                onChapterChanged(m_chapterCombo->currentData().toInt());
+            });
+
+    applyTextStyle();
+}
+
+void BibleView::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Left) {
+        onPrevChapter();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Right) {
+        onNextChapter();
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void BibleView::onPrevChapter()
+{
+    if (!m_module || m_bookCombo->count() == 0) return;
+    int ch = m_chapterCombo->currentData().toInt();
+    if (ch > 1) {
+        m_chapterCombo->blockSignals(true);
+        {
+            int ix = m_chapterCombo->findData(ch - 1);
+            if (ix >= 0) m_chapterCombo->setCurrentIndex(ix);
+        }
+        m_chapterCombo->blockSignals(false);
+        loadChapter();
+        return;
+    }
+    // предыдущая книга, последняя глава
+    int idx = m_bookCombo->currentIndex();
+    if (idx > 0) {
+        m_bookCombo->blockSignals(true);
+        m_bookCombo->setCurrentIndex(idx - 1);
+        m_bookCombo->blockSignals(false);
+        int bookId = m_bookCombo->currentData().toInt();
+        int maxCh = qMax(1, m_module->chapterCount(bookId));
+        m_chapterCombo->blockSignals(true);
+        m_chapterCombo->clear();
+        for (int c = 1; c <= maxCh; ++c)
+            m_chapterCombo->addItem(QString::number(c), c);
+        {
+            int sel = qBound(1, maxCh, maxCh);
+            int ix = m_chapterCombo->findData(sel);
+            if (ix >= 0) m_chapterCombo->setCurrentIndex(ix);
+        }
+        m_chapterCombo->blockSignals(false);
+        m_chapterLabel->setText(QString::fromUtf8("из %1").arg(maxCh));
+        loadChapter();
+    }
+}
+
+void BibleView::onNextChapter()
+{
+    if (!m_module || m_bookCombo->count() == 0) return;
+    int ch = m_chapterCombo->currentData().toInt();
+    int maxCh = m_chapterCombo->count();
+    if (ch < maxCh) {
+        m_chapterCombo->blockSignals(true);
+        {
+            int ix = m_chapterCombo->findData(ch + 1);
+            if (ix >= 0) m_chapterCombo->setCurrentIndex(ix);
+        }
+        m_chapterCombo->blockSignals(false);
+        loadChapter();
+        return;
+    }
+    // следующая книга, 1 глава
+    int idx = m_bookCombo->currentIndex();
+    if (idx + 1 < m_bookCombo->count()) {
+        m_bookCombo->blockSignals(true);
+        m_bookCombo->setCurrentIndex(idx + 1);
+        m_bookCombo->blockSignals(false);
+        int bookId = m_bookCombo->currentData().toInt();
+        int chapters = qMax(1, m_module->chapterCount(bookId));
+        m_chapterCombo->blockSignals(true);
+        m_chapterCombo->clear();
+        for (int c = 1; c <= chapters; ++c)
+            m_chapterCombo->addItem(QString::number(c), c);
+        {
+            int sel = qBound(1, 1, chapters);
+            int ix = m_chapterCombo->findData(sel);
+            if (ix >= 0) m_chapterCombo->setCurrentIndex(ix);
+        }
+        m_chapterCombo->blockSignals(false);
+        m_chapterLabel->setText(QString::fromUtf8("из %1").arg(chapters));
+        loadChapter();
+    }
+}
+
+QString BibleView::bookmarkKey() const
+{
+    if (!m_module) return "none";
+    return m_module->name();
+}
+
+void BibleView::loadBookmarks()
+{
+    refreshBookmarkList();
+}
+
+void BibleView::saveBookmarks()
+{
+    // список уже в QSettings через refresh при add/remove
+}
+
+void BibleView::refreshBookmarkList()
+{
+    m_bookmarkList->clear();
+    if (!m_module) return;
+
+    QSettings s("BibleApp", "BibleApp");
+    QStringList list = s.value("bookmarks/" + bookmarkKey()).toStringList();
+    for (const QString &entry : list) {
+        // format: bookId|chapter|label
+        QStringList parts = entry.split('|');
+        if (parts.size() >= 3) {
+            auto *item = new QListWidgetItem(parts[2], m_bookmarkList);
+            item->setData(Qt::UserRole, parts[0].toInt());
+            item->setData(Qt::UserRole + 1, parts[1].toInt());
+        }
+    }
+}
+
+void BibleView::onAddBookmark()
+{
+    if (!m_module || m_bookCombo->currentIndex() < 0) return;
+
+    int book = m_bookCombo->currentData().toInt();
+    int chapter = m_chapterCombo->currentData().toInt();
+    QString label = QString("%1 %2").arg(m_bookCombo->currentText()).arg(chapter);
+    QString entry = QString("%1|%2|%3").arg(book).arg(chapter).arg(label);
+
+    QSettings s("BibleApp", "BibleApp");
+    QString key = "bookmarks/" + bookmarkKey();
+    QStringList list = s.value(key).toStringList();
+    if (!list.contains(entry)) {
+        list.append(entry);
+        s.setValue(key, list);
+    }
+    refreshBookmarkList();
+    if (parentWidget() && parentWidget()->window()) {
+        // статус через parent сложно — просто ок
+    }
+}
+
+void BibleView::onBookmarkClicked()
+{
+    auto *item = m_bookmarkList->currentItem();
+    if (!item) return;
+    int book = item->data(Qt::UserRole).toInt();
+    int chapter = item->data(Qt::UserRole + 1).toInt();
+    goTo(book, chapter, 1);
+}
+
+void BibleView::onRemoveBookmark()
+{
+    auto *item = m_bookmarkList->currentItem();
+    if (!item || !m_module) return;
+
+    int book = item->data(Qt::UserRole).toInt();
+    int chapter = item->data(Qt::UserRole + 1).toInt();
+    QString label = item->text();
+    QString entry = QString("%1|%2|%3").arg(book).arg(chapter).arg(label);
+
+    QSettings s("BibleApp", "BibleApp");
+    QString key = "bookmarks/" + bookmarkKey();
+    QStringList list = s.value(key).toStringList();
+    list.removeAll(entry);
+    s.setValue(key, list);
+    refreshBookmarkList();
+}
+
+static void savePanelState(BibleView *view)
+{
+    if (!view)
+        return;
+    QString key = QStringLiteral("panel/left");
+    if (view->objectName() == QLatin1String("panelRight"))
+        key = QStringLiteral("panel/right");
+    QSettings settings(QStringLiteral("BibleApp"), QStringLiteral("BibleApp"));
+    settings.setValue(key + QStringLiteral("/fontSize"), view->fontSize());
+    if (view->module()) {
+        settings.setValue(key + QStringLiteral("/module"), view->module()->name());
+        settings.setValue(key + QStringLiteral("/book"), view->currentBook());
+        settings.setValue(key + QStringLiteral("/chapter"), view->currentChapter());
+    }
+    settings.sync();
+}
+
+void BibleView::setFontSize(int points)
+{
+    m_fontSize = qBound(10, points, 28);
+    m_fontLabel->setText(QString::number(m_fontSize));
+    applyTextStyle();
+    loadChapter();
+    savePanelState(this);
+}
+
+void BibleView::onFontBigger() { setFontSize(m_fontSize + 1); }
+void BibleView::onFontSmaller() { setFontSize(m_fontSize - 1); }
+
+void BibleView::applyTextStyle()
+{
+    m_textView->setStyleSheet(QString(
+        "QTextBrowser {"
+        "  background-color: #f7f0e0;"
+        "  color: #2c1810;"
+        "  border: 1px solid #d4c4a8;"
+        "  border-radius: 4px;"
+        "  padding: 14px;"
+        "  font-family: Serif;"
+        "  font-size: %1pt;"
+        "  selection-background-color: #e0d0a0;"
+        "}"
+        "QTextBrowser QScrollBar:vertical {"
+        "  background: #f0e6d0;"
+        "  width: 14px;"
+        "  margin: 0;"
+        "  border-radius: 7px;"
+        "}"
+        "QTextBrowser QScrollBar::handle:vertical {"
+        "  background: #c4b090;"
+        "  min-height: 32px;"
+        "  border-radius: 7px;"
+        "  border: 1px solid #a89070;"
+        "}"
+        "QTextBrowser QScrollBar::handle:vertical:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QTextBrowser QScrollBar::add-line:vertical,"
+        "QTextBrowser QScrollBar::sub-line:vertical {"
+        "  height: 0;"
+        "  background: none;"
+        "}"
+        "QTextBrowser QScrollBar::add-page:vertical,"
+        "QTextBrowser QScrollBar::sub-page:vertical {"
+        "  background: #f0e6d0;"
+        "}"
+        "QTextBrowser QScrollBar:horizontal {"
+        "  background: #f0e6d0;"
+        "  height: 14px;"
+        "  margin: 0;"
+        "  border-radius: 7px;"
+        "}"
+        "QTextBrowser QScrollBar::handle:horizontal {"
+        "  background: #c4b090;"
+        "  min-width: 32px;"
+        "  border-radius: 7px;"
+        "  border: 1px solid #a89070;"
+        "}"
+        "QTextBrowser QScrollBar::handle:horizontal:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QTextBrowser QScrollBar::add-line:horizontal,"
+        "QTextBrowser QScrollBar::sub-line:horizontal {"
+        "  width: 0;"
+        "  background: none;"
+        "}"
+        "QTextBrowser QScrollBar::add-page:horizontal,"
+        "QTextBrowser QScrollBar::sub-page:horizontal {"
+        "  background: #f0e6d0;"
+        "}"
+    ).arg(m_fontSize));
+}
+
+void BibleView::setModule(Module *module)
+{
+    m_module = module;
+    m_bookCombo->clear();
+    m_searchResults->clear();
+    m_parallelList->clear();
+
+    if (!m_module || !m_module->isValid()) {
+        m_moduleLabel->setText(QString::fromUtf8("Модуль не выбран"));
+        m_textView->setHtml(QString::fromUtf8("<p style='color:#666'>Выберите модуль.</p>"));
+        m_bookmarkList->clear();
+        return;
+    }
+
+    m_moduleLabel->setText(m_module->name());
+    for (const auto &book : m_module->books())
+        m_bookCombo->addItem(book.fullName, book.id);
+
+    loadBookmarks();
+
+    if (m_bookCombo->count() > 0) {
+        m_bookCombo->setCurrentIndex(0);
+        onBookChanged(0);
+    }
+}
+
+void BibleView::goTo(int book, int chapter, int verse)
+{
+    if (!m_module) return;
+    for (int i = 0; i < m_bookCombo->count(); ++i) {
+        if (m_bookCombo->itemData(i).toInt() == book) {
+            m_bookCombo->setCurrentIndex(i);
+            break;
+        }
+    }
+    {
+        int chapters = qMax(1, m_module->chapterCount(book));
+        m_chapterCombo->blockSignals(true);
+        m_chapterCombo->clear();
+        for (int c = 1; c <= chapters; ++c)
+            m_chapterCombo->addItem(QString::number(c), c);
+        int sel = qBound(1, chapter, chapters);
+        int ix = m_chapterCombo->findData(sel);
+        if (ix >= 0)
+            m_chapterCombo->setCurrentIndex(ix);
+        m_chapterCombo->blockSignals(false);
+        if (m_chapterLabel)
+            m_chapterLabel->setText(QString::fromUtf8("из %1").arg(chapters));
+    }
+    m_currentVerse = verse;
+    loadChapter();
+    setFocus();
+}
+
+
+void BibleView::onBookChanged(int index)
+{
+    if (!m_module || index < 0) return;
+    m_currentBook = m_bookCombo->itemData(index).toInt();
+    int chapters = qMax(1, m_module->chapterCount(m_currentBook));
+    m_chapterCombo->blockSignals(true);
+    m_chapterCombo->clear();
+    for (int c = 1; c <= chapters; ++c)
+        m_chapterCombo->addItem(QString::number(c), c);
+    {
+        int sel = qBound(1, 1, chapters);
+        int ix = m_chapterCombo->findData(sel);
+        if (ix >= 0) m_chapterCombo->setCurrentIndex(ix);
+    }
+    m_chapterCombo->blockSignals(false);
+    m_chapterLabel->setText(QString::fromUtf8("из %1").arg(chapters));
+    loadChapter();
+    savePanelState(this);
+}
+
+void BibleView::onChapterChanged(int chapter)
+{
+    if (chapter < 1) return;
+    m_currentChapter = chapter;
+    loadChapter();
+    savePanelState(this);
+}
+
+void BibleView::loadChapter()
+{
+    if (!m_module || !m_textView) return;
+    int index = m_bookCombo->currentIndex();
+    if (index < 0) {
+        m_textView->setHtml(QString::fromUtf8("<p style='color:#666'>Выберите книгу.</p>"));
+        return;
+    }
+
+    m_currentBook = m_bookCombo->itemData(index).toInt();
+    m_currentChapter = m_chapterCombo->currentData().toInt();
+    if (m_currentBook <= 0 || m_currentChapter <= 0) {
+        m_textView->setHtml(QString::fromUtf8("<p style='color:#666'>Некорректная ссылка.</p>"));
+        return;
+    }
+
+    QString html = m_module->getChapterText(m_currentBook, m_currentChapter);
+    if (html.isEmpty()) {
+        m_textView->setHtml(QString::fromUtf8(
+            "<p style='color:#666'>Нет текста для %1, глава %2.</p>")
+            .arg(m_bookCombo->currentText()).arg(m_currentChapter));
+    } else {
+        QString header = QString("<h2 style='color:#3a2a1a; margin-top:0;'>%1 %2</h2>")
+                             .arg(m_bookCombo->currentText().toHtmlEscaped()).arg(m_currentChapter);
+        m_textView->setHtml(header + html);
+        m_textView->moveCursor(QTextCursor::Start);
+    }
+    showParallelForCurrent();
+    emit verseChanged(m_currentBook, m_currentChapter, m_currentVerse);
+}
+
+void BibleView::showParallelForCurrent()
+{
+    m_parallelList->clear();
+    for (int v = 1; v <= 12; ++v) {
+        for (const QString &r : parallelRefs(m_currentBook, m_currentChapter, v)) {
+            m_parallelList->addItem(QString("%1:%2 — %3").arg(m_currentChapter).arg(v).arg(r));
+        }
+    }
+    if (m_parallelList->count() == 0)
+        m_parallelList->addItem(QString::fromUtf8("(нет данных)"));
+}
+
+void BibleView::onSearch()
+{
+    m_searchResults->clear();
+    if (!m_module || m_searchEdit->text().trimmed().isEmpty())
+        return;
+
+    QString q = m_searchEdit->text().trimmed();
+    auto results = m_module->search(q, 50);
+    for (const auto &r : results) {
+        QString label = QString("%1 %2:%3 — %4")
+                            .arg(r.bookName).arg(r.chapter).arg(r.verse).arg(r.snippet);
+        auto *item = new QListWidgetItem(label, m_searchResults);
+        item->setData(Qt::UserRole, r.book);
+        item->setData(Qt::UserRole + 1, r.chapter);
+        item->setData(Qt::UserRole + 2, r.verse);
+    }
+    if (m_searchResults->count() == 0)
+        m_searchResults->addItem(QString::fromUtf8("Ничего не найдено"));
+}
+
+void BibleView::onSearchResultClicked()
+{
+    auto *item = m_searchResults->currentItem();
+    if (!item || !item->data(Qt::UserRole).isValid()) return;
+    goTo(item->data(Qt::UserRole).toInt(),
+         item->data(Qt::UserRole + 1).toInt(),
+         item->data(Qt::UserRole + 2).toInt());
+}
+
+void BibleView::onAnchorClicked(const QUrl &url)
+{
+    if (url.scheme() == QStringLiteral("v")) {
+        // v://book/chapter/verse — номера Стронга для стиха (KJV PD)
+        QString path = url.path();
+        if (path.startsWith('/')) path = path.mid(1);
+        const QStringList parts = path.split('/');
+        if (parts.size() >= 3) {
+            int book = parts[0].toInt();
+            int chapter = parts[1].toInt();
+            int verse = parts[2].toInt();
+            QString strongs = Module::lookupVerseStrongs(book, chapter, verse);
+            QString html;
+            if (strongs.isEmpty()) {
+                html = QString::fromUtf8("<b>%1:%2</b> — номера Стронга не найдены")
+                           .arg(chapter).arg(verse);
+            } else {
+                html = QString::fromUtf8("<b>Стих %1:%2</b> — Strong (KJV):<br>").arg(chapter).arg(verse);
+                const QStringList nums = strongs.split(' ', Qt::SkipEmptyParts);
+                QStringList lines;
+                for (const QString &n : nums) {
+                    QString g = Module::lookupStrongGloss(n);
+                    if (!g.isEmpty())
+                        lines << QString("<b>%1</b> — %2").arg(n.toHtmlEscaped(), g.toHtmlEscaped());
+                    else
+                        lines << QString("<b>%1</b>").arg(n.toHtmlEscaped());
+                }
+                html += lines.join("<br>");
+            }
+            if (m_wordInfo)
+                m_wordInfo->setText(html);
+        }
+        return;
+    }
+    if (url.scheme() != QStringLiteral("w"))
+        return;
+
+    QUrlQuery q(url);
+    QString word = q.queryItemValue(QStringLiteral("g"));
+    QString meaning = q.queryItemValue(QStringLiteral("m"));
+    QString strong = q.queryItemValue(QStringLiteral("s"));
+
+    if (word.isEmpty()) {
+        QString s = url.toString();
+        if (s.startsWith("w:"))
+            s = s.mid(2);
+        int bar = s.indexOf('|');
+        if (bar >= 0) {
+            word = QUrl::fromPercentEncoding(s.left(bar).toUtf8());
+            meaning = QUrl::fromPercentEncoding(s.mid(bar + 1).toUtf8());
+        } else {
+            word = QUrl::fromPercentEncoding(s.toUtf8());
+        }
+    }
+
+    QString html;
+    if (!strong.isEmpty()) {
+        QString article = Module::lookupStrongArticle(strong);
+        if (!article.isEmpty()) {
+            html = article;
+        }
+    }
+    if (html.isEmpty()) {
+        if (meaning.isEmpty())
+            meaning = Module::lookupGloss(word);
+        if (meaning.isEmpty() || meaning == QString::fromUtf8("—"))
+            meaning = Module::lookupStrongGloss(strong);
+        if (meaning.isEmpty() || meaning == QString::fromUtf8("—"))
+            meaning = QString::fromUtf8("перевод не найден");
+
+        html = QString::fromUtf8("<b>%1</b> — %2").arg(word.toHtmlEscaped(), meaning.toHtmlEscaped());
+        if (!strong.isEmpty())
+            html = QString::fromUtf8("<b>%1</b> · ").arg(strong.toHtmlEscaped()) + html;
+
+        QString thayer = Module::lookupThayer(word);
+        if (!thayer.isEmpty()) {
+            QString shortT = thayer;
+            if (shortT.length() > 900)
+                shortT = shortT.left(900) + "...";
+            html += QString::fromUtf8("<br><span style='color:#333; font-size:12px;'><b>Thayer:</b> %1</span>")
+                        .arg(shortT.toHtmlEscaped());
+        }
+    }
+    if (m_wordInfo)
+        m_wordInfo->setText(html);
+}
+
+
+################################################################################
+# FILE: src/Module.h
+################################################################################
+
+#ifndef MODULE_H
+#define MODULE_H
+
+#include <QString>
+#include <QStringList>
+#include <QVector>
+#include <QSqlDatabase>
+
+struct Verse {
+    int book = 0;
+    int chapter = 0;
+    int verse = 0;
+    QString text;
+};
+
+struct BookInfo {
+    int id = 0;
+    QString shortName;
+    QString fullName;
+    int chapters = 0;
+};
+
+struct SearchHit {
+    int book = 0;
+    int chapter = 0;
+    int verse = 0;
+    QString bookName;
+    QString snippet;
+};
+
+class Module
+{
+public:
+    Module() = default;
+    explicit Module(const QString &path);
+
+    bool isValid() const { return m_valid; }
+    QString path() const { return m_path; }
+    QString name() const { return m_name; }
+    QString description() const { return m_description; }
+    QString type() const { return m_type; }
+    QString language() const { return m_language; }
+
+    QVector<BookInfo> books() const { return m_books; }
+    QStringList bookNames() const;
+
+    QString getVerseText(int book, int chapter, int verse) const;
+    QString getChapterText(int book, int chapter) const;
+    int chapterCount(int book) const;
+    int verseCount(int book, int chapter) const;
+
+    QVector<SearchHit> search(const QString &query, int limit = 50) const;
+
+    static bool createTestModule(const QString &targetDir);
+    static bool createInterlinearModule(const QString &targetDir);
+    static QString lookupThayer(const QString &greekWord);
+    static QString lookupVerseStrongs(int book, int chapter, int verse);
+    static QString lookupStrongGloss(const QString &strongNum);
+    /** Полная статья Стронга (HTML, с русским кратким значением). */
+    static QString lookupStrongArticle(const QString &strongNum);
+    static QString lookupGloss(const QString &greekWord);
+
+private:
+    bool load();
+    bool openDatabase() const;
+    QString bookNameById(int id) const;
+
+    QString m_path;
+    QString m_name;
+    QString m_description;
+    QString m_type = "bible";
+    QString m_language = "ru";
+    bool m_valid = false;
+    QVector<BookInfo> m_books;
+
+    mutable QSqlDatabase m_db;
+    QString m_connectionName;
+};
+
+#endif
+
+
+################################################################################
+# FILE: src/Module.cpp
+################################################################################
+
+#include "Module.h"
+#include <QSqlQuery>
+#include <QHash>
+#include <QCoreApplication>
+#include <QSqlError>
+#include <QSqlRecord>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
+#include <QUrl>
+#include <QUrlQuery>
+#include <QDir>
+#include <QUuid>
+#include <QDebug>
+#include <QStandardPaths>
+
+Module::Module(const QString &path)
+    : m_path(path)
+{
+    m_connectionName = QString("mod_") + QUuid::createUuid().toString(QUuid::Id128);
+    m_valid = load();
+}
+
+bool Module::load()
+{
+    QFile metaFile(m_path + "/module.json");
+    if (!metaFile.exists() || !metaFile.open(QIODevice::ReadOnly))
+        return false;
+
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(metaFile.readAll(), &err);
+    metaFile.close();
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return false;
+
+    QJsonObject obj = doc.object();
+    m_name = obj.value("name").toString(QString::fromUtf8("Без названия"));
+    m_description = obj.value("description").toString();
+    m_type = obj.value("type").toString("bible");
+    m_language = obj.value("language").toString("ru");
+
+    if (!openDatabase())
+        return false;
+
+    QSqlQuery query(m_db);
+    if (!query.exec("SELECT id, short_name, full_name, chapters FROM books ORDER BY id")) {
+        qWarning() << "Failed to load books:" << query.lastError();
+        return false;
+    }
+
+    m_books.clear();
+    while (query.next()) {
+        BookInfo book;
+        book.id = query.value(0).toInt();
+        book.shortName = query.value(1).toString();
+        book.fullName = query.value(2).toString();
+        book.chapters = query.value(3).toInt();
+        m_books.append(book);
+    }
+
+    return !m_books.isEmpty();
+}
+
+bool Module::openDatabase() const
+{
+    if (QSqlDatabase::contains(m_connectionName)) {
+        m_db = QSqlDatabase::database(m_connectionName);
+        return m_db.isOpen();
+    }
+
+    if (!QSqlDatabase::isDriverAvailable("QSQLITE")) {
+        qWarning() << "QSQLITE driver not available";
+        return false;
+    }
+
+    m_db = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
+    m_db.setDatabaseName(m_path + "/data.sqlite");
+    if (!m_db.open()) {
+        qWarning() << "Cannot open module database:" << m_db.lastError();
+        return false;
+    }
+    return true;
+}
+
+QStringList Module::bookNames() const
+{
+    QStringList names;
+    for (const auto &book : m_books)
+        names << book.fullName;
+    return names;
+}
+
+QString Module::getVerseText(int book, int chapter, int verse) const
+{
+    if (!openDatabase())
+        return {};
+
+    QSqlQuery query(m_db);
+    query.prepare("SELECT text FROM verses WHERE book = ? AND chapter = ? AND verse = ?");
+    query.addBindValue(book);
+    query.addBindValue(chapter);
+    query.addBindValue(verse);
+
+    if (query.exec() && query.next())
+        return query.value(0).toString();
+    return {};
+}
+
+
+
+static QString greekLexiconPath()
+{
+    // 1) рядом с бинарником /share
+    QStringList candidates;
+    candidates << QCoreApplication::applicationDirPath() + "/greek_lexicon.sqlite";
+    candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/greek_lexicon.sqlite";
+    candidates << "/usr/share/bibleapp/greek_lexicon.sqlite";
+    candidates << QStandardPaths::locate(QStandardPaths::AppDataLocation, "greek_lexicon.sqlite");
+    for (const QString &p : candidates) {
+        if (!p.isEmpty() && QFile::exists(p))
+            return p;
+    }
+    return {};
+}
+
+static QString lookupFullLexicon(const QString &word)
+{
+    static bool tried = false;
+    static QSqlDatabase db;
+    static QString conn = QStringLiteral("greek_lex_conn");
+
+    if (!tried) {
+        tried = true;
+        QString path = greekLexiconPath();
+        if (path.isEmpty() || !QSqlDatabase::isDriverAvailable("QSQLITE"))
+            return {};
+        if (QSqlDatabase::contains(conn))
+            db = QSqlDatabase::database(conn);
+        else {
+            db = QSqlDatabase::addDatabase("QSQLITE", conn);
+            db.setDatabaseName(path);
+            db.setConnectOptions("QSQLITE_OPEN_READONLY");
+            if (!db.open())
+                return {};
+        }
+    }
+    if (!db.isOpen())
+        return {};
+
+    QString w = word;
+    QSqlQuery q(db);
+    q.prepare("SELECT gloss FROM greek WHERE lemma = ? LIMIT 1");
+    q.addBindValue(w);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+
+    // нормализация без диакритики
+    QString folded;
+    for (QChar ch : w) {
+        // упрощённо: оставляем буквы
+        if (ch.isLetter())
+            folded.append(ch.toLower());
+    }
+    q.prepare("SELECT gloss FROM greek WHERE lemma_norm = ? LIMIT 1");
+    q.addBindValue(folded);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+
+    return {};
+}
+
+
+static QString translateGreekWord(const QString &word)
+{
+    static QHash<QString, QString> ru;
+    if (ru.isEmpty()) {
+        auto add = [&](const char *g, const char *r) {
+            ru.insert(QString::fromUtf8(g), QString::fromUtf8(r));
+        };
+        add("ὁ", "арт."); add("ἡ", "арт."); add("τό", "арт."); add("τὸ", "арт.");
+        add("καί", "и"); add("καὶ", "и"); add("δέ", "же"); add("δὲ", "же");
+        add("γάρ", "ибо"); add("γὰρ", "ибо"); add("ἀλλά", "но"); add("ἀλλὰ", "но"); add("ἀλλ’", "но");
+        add("ὅτι", "что, ибо"); add("ἵνα", "чтобы"); add("οὐ", "не"); add("οὐκ", "не"); add("μή", "не"); add("μὴ", "не");
+        add("ἐν", "в"); add("Ἐν", "в"); add("εἰς", "в, к"); add("ἐκ", "из"); add("πρὸς", "к, у"); add("πρός", "к, у");
+        add("διά", "через"); add("διὰ", "через"); add("δι’", "через"); add("ἀπό", "от"); add("ἀπὸ", "от");
+        add("θεός", "Бог"); add("θεὸς", "Бог"); add("θεοῦ", "Бога"); add("θεόν", "Бога"); add("θεὸν", "Бога");
+        add("λόγος", "слово"); add("Ἰησοῦς", "Иисус"); add("Χριστός", "Христос"); add("Χριστοῦ", "Христа");
+        add("πνεῦμα", "дух"); add("υἱός", "сын"); add("πατήρ", "отец"); add("πατρός", "отца");
+        add("ἄνθρωπος", "человек"); add("κόσμος", "мир"); add("ζωή", "жизнь"); add("ζωὴ", "жизнь");
+        add("φῶς", "свет"); add("σκοτία", "тьма"); add("ἀρχῇ", "начале"); add("ἀρχή", "начало");
+        add("ἦν", "было"); add("ἐγένετο", "стало"); add("γέγονεν", "стало");
+        add("αὐτοῦ", "его"); add("αὐτόν", "его"); add("αὐτὸν", "его"); add("αὐτῶν", "их");
+        add("οὗτος", "сей"); add("πάντα", "всё"); add("χωρὶς", "без"); add("οὐδὲ", "ни");
+        add("Ἰωάννης", "Иоанн"); add("μαρτυρίαν", "свидетельство"); add("φωτίζει", "просвещает");
+        add("δόξαν", "славу"); add("χάριτος", "благодати"); add("ἀληθείας", "истины");
+        add("μονογενὴς", "единородный"); add("ἐξηγήσατο", "явил");
+    }
+
+    QString w = word.trimmed();
+    while (!w.isEmpty() && !w[0].isLetter())
+        w = w.mid(1);
+    while (!w.isEmpty() && !w.back().isLetter())
+        w.chop(1);
+    if (w.isEmpty())
+        return {};
+
+    if (ru.contains(w))
+        return ru.value(w);
+
+    for (auto it = ru.constBegin(); it != ru.constEnd(); ++it) {
+        if (it.key().compare(w, Qt::CaseInsensitive) == 0)
+            return it.value();
+    }
+
+    QString full = lookupFullLexicon(w);
+    if (!full.isEmpty())
+        return full;
+
+    return QString::fromUtf8("—");
+}
+
+static QString annotateGreek(const QString &greek)
+{
+    // Формат подстрочника: ORIG¦GLOSS¦STRONG  (слова через пробел)
+    QStringList parts = greek.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    QStringList out;
+    bool interlinear = false;
+    for (const QString &p : parts) {
+        if (p.contains(QChar(0x00A6)) || p.contains(QLatin1Char('|'))) {
+            interlinear = true;
+            break;
+        }
+    }
+
+    if (interlinear) {
+        for (const QString &rawPart : parts) {
+            QStringList fields = rawPart.split(QChar(0x00A6));
+            if (fields.size() < 2)
+                fields = rawPart.split(QLatin1Char('|'));
+            if (fields.size() < 2) {
+                out << rawPart.toHtmlEscaped() + " ";
+                continue;
+            }
+            QString orig = fields.value(0).trimmed();
+            QString gloss = fields.value(1).trimmed();
+            QString strong = fields.value(2).trimmed().toUpper();
+
+            if (gloss.isEmpty() && !strong.isEmpty())
+                gloss = Module::lookupStrongGloss(strong);
+            if (gloss.isEmpty()) {
+                gloss = translateGreekWord(orig);
+                if (gloss == QString::fromUtf8("—"))
+                    gloss.clear();
+            }
+
+            QUrl href;
+            href.setScheme(QStringLiteral("w"));
+            href.setPath(QStringLiteral("/"));
+            QUrlQuery uq;
+            uq.addQueryItem(QStringLiteral("g"), orig);
+            if (!gloss.isEmpty())
+                uq.addQueryItem(QStringLiteral("m"), gloss);
+            if (!strong.isEmpty())
+                uq.addQueryItem(QStringLiteral("s"), strong);
+            href.setQuery(uq);
+
+            QString title = strong.isEmpty() ? gloss : (strong + " — " + gloss);
+            out << QString(
+                "<span style=\"display:inline-block; text-align:center; margin:0 6px 8px 0; vertical-align:top;\">"
+                "<a href=\"%1\" title=\"%2\" style=\"color:#2d6a4f; text-decoration:none;\">"
+                "<span style=\"display:block; font-size:11px; color:#5a4a3a; line-height:1.2;\">%3</span>"
+                "<span style=\"display:block; font-size:16px; line-height:1.3;\">%4</span>"
+                "<span style=\"display:block; font-size:10px; color:#887; line-height:1.1;\">%5</span>"
+                "</a></span>"
+            ).arg(href.toString(QUrl::FullyEncoded),
+                  title.toHtmlEscaped(),
+                  gloss.isEmpty() ? QString::fromUtf8("—") : gloss.toHtmlEscaped(),
+                  orig.toHtmlEscaped(),
+                  strong.toHtmlEscaped());
+        }
+        return out.join("");
+    }
+
+    for (const QString &rawPart : parts) {
+        QString part = rawPart;
+        QString trail;
+        while (!part.isEmpty() && !part.back().isLetter()) {
+            trail.prepend(part.back());
+            part.chop(1);
+        }
+        QString lead;
+        while (!part.isEmpty() && !part[0].isLetter()) {
+            lead.append(part[0]);
+            part = part.mid(1);
+        }
+        if (part.isEmpty()) {
+            out << rawPart.toHtmlEscaped() + " ";
+            continue;
+        }
+        QString meaning = translateGreekWord(part);
+        if (meaning == QString::fromUtf8("—"))
+            meaning.clear();
+        QUrl href;
+        href.setScheme(QStringLiteral("w"));
+        href.setPath(QStringLiteral("/"));
+        QUrlQuery uq;
+        uq.addQueryItem(QStringLiteral("g"), part);
+        if (!meaning.isEmpty())
+            uq.addQueryItem(QStringLiteral("m"), meaning);
+        href.setQuery(uq);
+        QString safe = part.toHtmlEscaped();
+        QString glossHtml = meaning.isEmpty()
+            ? QString("<span style=\"color:#aaa; font-size:small;\"> —</span>")
+            : QString("<span style=\"color:#555; font-size:small;\"> %1</span>").arg(meaning.toHtmlEscaped());
+        out << QString(
+            "%1<a href=\"%2\" title=\"%3\" style=\"color:#2d6a4f; text-decoration:none;\">"
+            "<span style=\"white-space:nowrap;\">%4%5</span></a>%6 "
+        ).arg(lead.toHtmlEscaped(),
+              href.toString(QUrl::FullyEncoded),
+              meaning.isEmpty() ? QString::fromUtf8("нет в словаре") : meaning.toHtmlEscaped(),
+              safe, glossHtml, trail.toHtmlEscaped());
+    }
+    return out.join("");
+}
+
+QString Module::getChapterText(int book, int chapter) const
+{
+    if (!openDatabase())
+        return {};
+
+    // Есть ли колонка text_orig (подстрочник)
+    bool hasOrigCol = false;
+    {
+        QSqlQuery pr(m_db);
+        if (pr.exec("PRAGMA table_info(verses)")) {
+            while (pr.next()) {
+                if (pr.value(1).toString() == QLatin1String("text_orig")) {
+                    hasOrigCol = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    QSqlQuery query(m_db);
+    if (hasOrigCol)
+        query.prepare("SELECT verse, text, text_orig FROM verses WHERE book = ? AND chapter = ? ORDER BY verse");
+    else
+        query.prepare("SELECT verse, text FROM verses WHERE book = ? AND chapter = ? ORDER BY verse");
+    query.addBindValue(book);
+    query.addBindValue(chapter);
+    if (!query.exec()) {
+        qWarning() << "getChapterText failed:" << book << chapter << query.lastError();
+        return {};
+    }
+
+    QString result;
+    while (query.next()) {
+        int v = query.value(0).toInt();
+        QString text = query.value(1).toString().toHtmlEscaped();
+        if (hasOrigCol) {
+            QString orig = query.value(2).toString();
+            if (!orig.isEmpty()) {
+                {
+                    const QString lead = QString::number(v);
+                    if (text.startsWith(lead)) {
+                        QString rest = text.mid(lead.size());
+                        if (rest.startsWith('.') || rest.startsWith(')') || rest.startsWith(':'))
+                            rest = rest.mid(1);
+                        text = rest.trimmed();
+                    }
+                }
+                result += QString(
+                    "<div style='margin:12px 0 18px 0; padding-bottom:10px; border-bottom:1px solid #e0d4c0;'>"
+                    "<div style='color:#2c1810; margin-bottom:8px;'>"
+                    "<span style='font-weight:700; font-size:1.08em; margin-right:0.5em;'>%1</span>"
+                    "<span> %2</span></div>"
+                    "<div style='line-height:1.35; padding-left:0.5em;'>%3</div>"
+                    "</div>"
+                ).arg(v).arg(text).arg(annotateGreek(orig));
+                continue;
+            }
+        }
+        // убрать ведущий номер стиха из текста, если конвертер его оставил
+        {
+            const QString lead = QString::number(v);
+            if (text.startsWith(lead)) {
+                QString rest = text.mid(lead.size());
+                if (rest.startsWith('.') || rest.startsWith(')') || rest.startsWith(':'))
+                    rest = rest.mid(1);
+                text = rest.trimmed();
+            }
+        }
+        result += QString(
+            "<p style='margin:0.85em 0; line-height:1.5;'>"
+            "<a href='v://%1/%2/%3' style='"
+            "color:#3a2410; text-decoration:none; font-weight:700; font-size:1.08em; "
+            "margin-right:0.5em; padding-right:0.15em;' title='Номера Стронга'>%3</a>"
+            "<span> %4</span></p>"
+        ).arg(book).arg(chapter).arg(v).arg(text);
+    }
+    return result;
+}
+
+int Module::chapterCount(int book) const
+{
+    // Реальное число глав по стихам (не «дырявый» ChapterQty из ini)
+    if (openDatabase()) {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral(
+            "SELECT COUNT(DISTINCT chapter) FROM verses WHERE book = ? AND length(trim(text)) > 0"));
+        query.addBindValue(book);
+        if (query.exec() && query.next()) {
+            int n = query.value(0).toInt();
+            if (n > 0)
+                return n;
+        }
+        query.prepare(QStringLiteral("SELECT COALESCE(MAX(chapter),0) FROM verses WHERE book = ?"));
+        query.addBindValue(book);
+        if (query.exec() && query.next()) {
+            int n = query.value(0).toInt();
+            if (n > 0)
+                return n;
+        }
+    }
+    for (const auto &b : m_books) {
+        if (b.id == book)
+            return b.chapters;
+    }
+    return 0;
+}
+
+int Module::verseCount(int book, int chapter) const
+{
+    if (!openDatabase())
+        return 0;
+
+    QSqlQuery query(m_db);
+    query.prepare("SELECT COUNT(*) FROM verses WHERE book = ? AND chapter = ?");
+    query.addBindValue(book);
+    query.addBindValue(chapter);
+    if (query.exec() && query.next())
+        return query.value(0).toInt();
+    return 0;
+}
+
+
+QString Module::bookNameById(int id) const
+{
+    for (const auto &b : m_books)
+        if (b.id == id) return b.fullName;
+    return QString::number(id);
+}
+
+QVector<SearchHit> Module::search(const QString &query, int limit) const
+{
+    QVector<SearchHit> hits;
+    if (!openDatabase() || query.trimmed().isEmpty())
+        return hits;
+
+    QSqlQuery q(m_db);
+    q.prepare("SELECT book, chapter, verse, text FROM verses WHERE text LIKE ? ORDER BY book, chapter, verse LIMIT ?");
+    q.addBindValue("%" + query.trimmed() + "%");
+    q.addBindValue(limit);
+    if (!q.exec())
+        return hits;
+
+    while (q.next()) {
+        SearchHit h;
+        h.book = q.value(0).toInt();
+        h.chapter = q.value(1).toInt();
+        h.verse = q.value(2).toInt();
+        h.bookName = bookNameById(h.book);
+        QString text = q.value(3).toString();
+        if (text.length() > 80)
+            text = text.left(77) + "...";
+        h.snippet = text;
+        hits.append(h);
+    }
+    return hits;
+}
+
+
+
+
+
+QString Module::lookupVerseStrongs(int book, int chapter, int verse)
+{
+    static bool tried = false;
+    static QSqlDatabase db;
+    static QString conn = QStringLiteral("verse_strongs_conn");
+    if (!tried) {
+        tried = true;
+        QStringList candidates;
+        candidates << "/usr/share/bibleapp/verse_strongs.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/verse_strongs.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/verse_strongs.sqlite";
+        QString path;
+        for (const QString &p : candidates) {
+            if (QFile::exists(p)) { path = p; break; }
+        }
+        if (path.isEmpty() || !QSqlDatabase::isDriverAvailable("QSQLITE"))
+            return {};
+        if (QSqlDatabase::contains(conn))
+            db = QSqlDatabase::database(conn);
+        else {
+            db = QSqlDatabase::addDatabase("QSQLITE", conn);
+            db.setDatabaseName(path);
+            db.setConnectOptions("QSQLITE_OPEN_READONLY");
+            if (!db.open())
+                return {};
+        }
+    }
+    if (!db.isOpen())
+        return {};
+    QSqlQuery q(db);
+    q.prepare("SELECT strongs FROM verse_strongs WHERE book=? AND chapter=? AND verse=?");
+    q.addBindValue(book);
+    q.addBindValue(chapter);
+    q.addBindValue(verse);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
+}
+
+static QSqlDatabase &strongsDb()
+{
+    static bool tried = false;
+    static QSqlDatabase db;
+    static QString conn = QStringLiteral("strongs_full_conn");
+    if (!tried) {
+        tried = true;
+        QStringList candidates;
+        candidates << "/usr/share/bibleapp/strongs_full.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/strongs_full.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/strongs_full.sqlite";
+        // fallback: старый греческий лексикон
+        candidates << "/usr/share/bibleapp/greek_lexicon.sqlite";
+        QString path;
+        for (const QString &p : candidates) {
+            if (QFile::exists(p)) { path = p; break; }
+        }
+        if (path.isEmpty() || !QSqlDatabase::isDriverAvailable("QSQLITE"))
+            return db;
+        if (QSqlDatabase::contains(conn))
+            db = QSqlDatabase::database(conn);
+        else {
+            db = QSqlDatabase::addDatabase("QSQLITE", conn);
+            db.setDatabaseName(path);
+            db.setConnectOptions("QSQLITE_OPEN_READONLY");
+            db.open();
+        }
+    }
+    return db;
+}
+
+static QString normalizeStrongNum(QString s)
+{
+    s = s.trimmed().toUpper();
+    if (s.startsWith(QLatin1Char('G')) || s.startsWith(QLatin1Char('H'))) {
+        QString digits = s.mid(1);
+        while (digits.startsWith(QLatin1Char('0')) && digits.size() > 1)
+            digits = digits.mid(1);
+        return s.left(1) + digits;
+    }
+    return s;
+}
+
+QString Module::lookupStrongGloss(const QString &strongNum)
+{
+    QSqlDatabase &db = strongsDb();
+    if (!db.isOpen()) return {};
+    QString full = normalizeStrongNum(strongNum);
+    QSqlQuery q(db);
+    // новая схема strongs_full
+    q.prepare("SELECT gloss_ru, gloss_en FROM strongs WHERE num = ? LIMIT 1");
+    q.addBindValue(full);
+    if (q.exec() && q.next()) {
+        QString ru = q.value(0).toString();
+        if (!ru.isEmpty()) return ru;
+        return q.value(1).toString();
+    }
+    // fallback старый greek_lexicon
+    q.prepare("SELECT gloss FROM greek WHERE strongs = ? LIMIT 1");
+    q.addBindValue(full);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    if (full.startsWith(QLatin1Char('G')) || full.startsWith(QLatin1Char('H'))) {
+        q.prepare("SELECT gloss FROM greek WHERE strongs = ? LIMIT 1");
+        q.addBindValue(full.mid(1));
+        if (q.exec() && q.next())
+            return q.value(0).toString();
+    }
+    return {};
+}
+
+QString Module::lookupStrongArticle(const QString &strongNum)
+{
+    QSqlDatabase &db = strongsDb();
+    if (!db.isOpen()) return {};
+    QString full = normalizeStrongNum(strongNum);
+    QSqlQuery q(db);
+    q.prepare("SELECT num, lemma, gloss_en, gloss_ru, def_en, deriv FROM strongs WHERE num = ? LIMIT 1");
+    q.addBindValue(full);
+    if (!(q.exec() && q.next()))
+        return {};
+
+    QString num = q.value(0).toString();
+    QString lemma = q.value(1).toString();
+    QString en = q.value(2).toString();
+    QString ru = q.value(3).toString();
+    QString defEn = q.value(4).toString();
+    QString deriv = q.value(5).toString();
+
+    QString html;
+    html += QString::fromUtf8("<div style='line-height:1.35'>");
+    html += QString::fromUtf8("<b style='font-size:14px'>%1</b>").arg(num.toHtmlEscaped());
+    if (!lemma.isEmpty())
+        html += QString::fromUtf8(" · <i>%1</i>").arg(lemma.toHtmlEscaped());
+    if (!ru.isEmpty())
+        html += QString::fromUtf8("<br><b>По-русски:</b> %1").arg(ru.toHtmlEscaped());
+    if (!en.isEmpty())
+        html += QString::fromUtf8("<br><b>Кратко (EN):</b> %1").arg(en.toHtmlEscaped());
+    if (!deriv.isEmpty())
+        html += QString::fromUtf8("<br><span style='color:#666'><b>Происх.:</b> %1</span>").arg(deriv.toHtmlEscaped());
+    if (!defEn.isEmpty()) {
+        QString d = defEn;
+        if (d.length() > 700) d = d.left(700) + "...";
+        html += QString::fromUtf8("<br><span style='color:#333; font-size:12px'>%1</span>").arg(d.toHtmlEscaped());
+    }
+    html += QString::fromUtf8("</div>");
+    return html;
+}
+
+QString Module::lookupGloss(const QString &greekWord)
+{
+    return translateGreekWord(greekWord);
+}
+
+static QString stripGreekDiacritics(const QString &in)
+{
+    // NFD + убрать combining marks (в т.ч. iota subscript U+0345)
+    QString nfd = in.normalized(QString::NormalizationForm_D);
+    QString out;
+    for (QChar ch : nfd) {
+        if (ch.category() == QChar::Mark_NonSpacing || ch.category() == QChar::Mark_SpacingCombining)
+            continue;
+        // final sigma -> sigma
+        if (ch == QChar(0x03C2))
+            ch = QChar(0x03C3);
+        out.append(ch);
+    }
+    return out;
+}
+
+QString Module::lookupThayer(const QString &greekWord)
+{
+    static bool tried = false;
+    static QSqlDatabase db;
+    static QString conn = QStringLiteral("thayer_lex_conn");
+
+    if (!tried) {
+        tried = true;
+        QStringList candidates;
+        candidates << "/usr/share/bibleapp/thayer_lexicon.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/thayer_lexicon.sqlite";
+        candidates << QCoreApplication::applicationDirPath() + "/thayer_lexicon.sqlite";
+        QString path;
+        for (const QString &p : candidates) {
+            if (QFile::exists(p)) { path = p; break; }
+        }
+        if (path.isEmpty() || !QSqlDatabase::isDriverAvailable("QSQLITE"))
+            return {};
+        if (QSqlDatabase::contains(conn))
+            db = QSqlDatabase::database(conn);
+        else {
+            db = QSqlDatabase::addDatabase("QSQLITE", conn);
+            db.setDatabaseName(path);
+            db.setConnectOptions("QSQLITE_OPEN_READONLY");
+            if (!db.open())
+                return {};
+        }
+    }
+    if (!db.isOpen())
+        return {};
+
+    QString w = greekWord.trimmed();
+    while (!w.isEmpty() && !w[0].isLetter()) w = w.mid(1);
+    while (!w.isEmpty() && !w.back().isLetter()) w.chop(1);
+    if (w.isEmpty()) return {};
+
+    QStringList variants;
+    variants << w;
+    QString stripped = stripGreekDiacritics(w);
+    if (stripped != w)
+        variants << stripped;
+    variants << w.toLower();
+    variants << stripped.toLower();
+
+    QSqlQuery q(db);
+    for (const QString &v : variants) {
+        q.prepare("SELECT text FROM entries WHERE lemma = ? LIMIT 1");
+        q.addBindValue(v);
+        if (q.exec() && q.next())
+            return q.value(0).toString();
+    }
+    for (const QString &v : variants) {
+        q.prepare("SELECT text FROM entries WHERE lemma_normalized = ? LIMIT 1");
+        q.addBindValue(v);
+        if (q.exec() && q.next())
+            return q.value(0).toString();
+    }
+    // без диакритики через replace на стороне SQL сложно — перебор LIKE по stripped
+    q.prepare("SELECT lemma, text FROM entries WHERE lemma_normalized LIKE ? LIMIT 20");
+    q.addBindValue(stripped.toLower() + "%");
+    if (q.exec()) {
+        while (q.next()) {
+            QString lem = q.value(0).toString();
+            if (stripGreekDiacritics(lem).compare(stripped, Qt::CaseInsensitive) == 0)
+                return q.value(1).toString();
+        }
+    }
+    return {};
+}
+
+bool Module::createTestModule(const QString &targetDir)
+{
+    QDir dir(targetDir);
+    if (!dir.exists() && !dir.mkpath("."))
+        return false;
+
+    if (!QSqlDatabase::isDriverAvailable("QSQLITE")) {
+        qWarning() << "QSQLITE not available, cannot create test module";
+        return false;
+    }
+
+    QJsonObject meta;
+    meta["name"] = QString::fromUtf8("Синодальный перевод (тестовый)");
+    meta["description"] = QString::fromUtf8("Тестовый модуль с несколькими главами");
+    meta["type"] = "bible";
+    meta["language"] = "ru";
+    meta["version"] = "0.3";
+
+    QFile metaFile(targetDir + "/module.json");
+    if (!metaFile.open(QIODevice::WriteOnly))
+        return false;
+    metaFile.write(QJsonDocument(meta).toJson(QJsonDocument::Indented));
+    metaFile.close();
+
+    QString connName = QString("create_test_") + QUuid::createUuid().toString(QUuid::Id128);
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(targetDir + "/data.sqlite");
+        if (!db.open()) {
+            QSqlDatabase::removeDatabase(connName);
+            return false;
+        }
+
+        QSqlQuery q(db);
+        q.exec("CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, short_name TEXT, full_name TEXT, chapters INTEGER)");
+        q.exec("CREATE TABLE IF NOT EXISTS verses (book INTEGER, chapter INTEGER, verse INTEGER, text TEXT, PRIMARY KEY(book, chapter, verse))");
+        q.exec("CREATE INDEX IF NOT EXISTS idx_verses_book_chapter ON verses(book, chapter)");
+
+        q.exec("DELETE FROM books");
+        q.exec("DELETE FROM verses");
+
+        q.exec("INSERT INTO books VALUES (1, 'Быт', 'Бытие', 1)");
+        q.exec("INSERT INTO books VALUES (43, 'Ин', 'От Иоанна', 1)");
+        q.exec("INSERT INTO books VALUES (19, 'Пс', 'Псалтирь', 1)");
+
+        struct V { int b, c, v; const char *t; };
+        const V verses[] = {
+            {1, 1, 1, "В начале сотворил Бог небо и землю."},
+            {1, 1, 2, "Земля же была безвидна и пуста, и тьма над бездною, и Дух Божий носился над водою."},
+            {1, 1, 3, "И сказал Бог: да будет свет. И стал свет."},
+            {1, 1, 4, "И увидел Бог свет, что он хорош, и отделил Бог свет от тьмы."},
+            {1, 1, 5, "И назвал Бог свет днем, а тьму ночью. И был вечер, и было утро: день один."},
+            {1, 1, 6, "И сказал Бог: да будет твердь посреди воды, и да отделяет она воду от воды."},
+            {1, 1, 7, "И создал Бог твердь, и отделил воду, которая под твердью, от воды, которая над твердью. И стало так."},
+            {1, 1, 8, "И назвал Бог твердь небом. И был вечер, и было утро: день второй."},
+            {1, 1, 9, "И сказал Бог: да соберется вода, которая под небом, в одно место, и да явится суша. И стало так."},
+            {1, 1, 10, "И назвал Бог сушу землею, а собрание вод назвал морями. И увидел Бог, что это хорошо."},
+            {43, 1, 1, "В начале было Слово, и Слово было у Бога, и Слово было Бог."},
+            {43, 1, 2, "Оно было в начале у Бога."},
+            {43, 1, 3, "Все чрез Него начало быть, и без Него ничто не начало быть, что начало быть."},
+            {43, 1, 4, "В Нем была жизнь, и жизнь была свет человеков."},
+            {43, 1, 5, "И свет во тьме светит, и тьма не объяла его."},
+            {43, 1, 6, "Был человек, посланный от Бога; имя ему Иоанн."},
+            {43, 1, 7, "Он пришел для свидетельства, чтобы свидетельствовать о Свете, дабы все уверовали чрез него."},
+            {43, 1, 8, "Он не был свет, но был послан, чтобы свидетельствовать о Свете."},
+            {43, 1, 9, "Был Свет истинный, Который просвещает всякого человека, приходящего в мир."},
+            {43, 1, 10, "В мире был, и мир чрез Него начал быть, и мир Его не познал."},
+            {43, 1, 11, "Пришел к своим, и свои Его не приняли."},
+            {43, 1, 12, "А тем, которые приняли Его, верующим во имя Его, дал власть быть чадами Божиими."},
+            {19, 1, 1, "Блажен муж, который не ходит на совет нечестивых и не стоит на пути грешных и не сидит в собрании развратителей,"},
+            {19, 1, 2, "но в законе Господа воля его, и о законе Его размышляет он день и ночь!"},
+            {19, 1, 3, "И будет он как дерево, посаженное при потоках вод, которое приносит плод свой во время свое, и лист которого не вянет; и во всем, что он ни делает, успеет."},
+            {19, 1, 4, "Не так — нечестивые; но они — как прах, возметаемый ветром."},
+            {19, 1, 5, "Потому не устоят нечестивые на суде, и грешники — в собрании праведных."},
+            {19, 1, 6, "Ибо знает Господь путь праведных, а путь нечестивых погибнет."},
+        };
+
+        q.prepare("INSERT INTO verses (book, chapter, verse, text) VALUES (?, ?, ?, ?)");
+        for (const auto &v : verses) {
+            q.addBindValue(v.b);
+            q.addBindValue(v.c);
+            q.addBindValue(v.v);
+            q.addBindValue(QString::fromUtf8(v.t));
+            if (!q.exec())
+                qWarning() << q.lastError();
+        }
+
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+    return true;
+}
+
+
+bool Module::createInterlinearModule(const QString &targetDir)
+{
+    QDir dir(targetDir);
+    if (!dir.exists() && !dir.mkpath("."))
+        return false;
+
+    if (!QSqlDatabase::isDriverAvailable("QSQLITE"))
+        return false;
+
+    QJsonObject meta;
+    meta["name"] = QString::fromUtf8("Подстрочник НЗ (греч. + рус.)");
+    meta["description"] = QString::fromUtf8("Русский текст сверху, греческий под ним. Тестовый модуль (Ин 1).");
+    meta["type"] = "interlinear";
+    meta["language"] = "ru-gr";
+    meta["version"] = "0.5";
+
+    QFile metaFile(targetDir + "/module.json");
+    if (!metaFile.open(QIODevice::WriteOnly))
+        return false;
+    metaFile.write(QJsonDocument(meta).toJson(QJsonDocument::Indented));
+    metaFile.close();
+
+    QString connName = QString("create_il_") + QUuid::createUuid().toString(QUuid::Id128);
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(targetDir + "/data.sqlite");
+        if (!db.open()) {
+            QSqlDatabase::removeDatabase(connName);
+            return false;
+        }
+
+        QSqlQuery q(db);
+        q.exec("CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, short_name TEXT, full_name TEXT, chapters INTEGER)");
+        q.exec("CREATE TABLE IF NOT EXISTS verses (book INTEGER, chapter INTEGER, verse INTEGER, text TEXT, text_orig TEXT, PRIMARY KEY(book, chapter, verse))");
+        q.exec("CREATE INDEX IF NOT EXISTS idx_verses_book_chapter ON verses(book, chapter)");
+        q.exec("DELETE FROM books");
+        q.exec("DELETE FROM verses");
+
+        q.exec("INSERT INTO books VALUES (43, 'Ин', 'От Иоанна', 1)");
+
+        // text = русский, text_orig = греческий (общественное достояние, Nestle-era / стандартный текст)
+        struct Row { int v; const char *ru; const char *gr; };
+        const Row rows[] = {
+            {1, "В начале было Слово, и Слово было у Бога, и Слово было Бог.",
+                "Ἐν ἀρχῇ ἦν ὁ λόγος, καὶ ὁ λόγος ἦν πρὸς τὸν θεόν, καὶ θεὸς ἦν ὁ λόγος."},
+            {2, "Оно было в начале у Бога.",
+                "οὗτος ἦν ἐν ἀρχῇ πρὸς τὸν θεόν."},
+            {3, "Все чрез Него начало быть, и без Него ничто не начало быть, что начало быть.",
+                "πάντα δι’ αὐτοῦ ἐγένετο, καὶ χωρὶς αὐτοῦ ἐγένετο οὐδὲ ἕν ὃ γέγονεν."},
+            {4, "В Нем была жизнь, и жизнь была свет человеков.",
+                "ἐν αὐτῷ ζωὴ ἦν, καὶ ἡ ζωὴ ἦν τὸ φῶς τῶν ἀνθρώπων."},
+            {5, "И свет во тьме светит, и тьма не объяла его.",
+                "καὶ τὸ φῶς ἐν τῇ σκοτίᾳ φαίνει, καὶ ἡ σκοτία αὐτὸ οὐ κατέλαβεν."},
+            {6, "Был человек, посланный от Бога; имя ему Иоанн.",
+                "ἐγένετο ἄνθρωπος ἀπεσταλμένος παρὰ θεοῦ, ὄνομα αὐτῷ Ἰωάννης."},
+            {7, "Он пришел для свидетельства, чтобы свидетельствовать о Свете, дабы все уверовали чрез него.",
+                "οὗτος ἦλθεν εἰς μαρτυρίαν, ἵνα μαρτυρήσῃ περὶ τοῦ φωτός, ἵνα πάντες πιστεύσωσιν δι’ αὐτοῦ."},
+            {8, "Он не был свет, но был послан, чтобы свидетельствовать о Свете.",
+                "οὐκ ἦν ἐκεῖνος τὸ φῶς, ἀλλ’ ἵνα μαρτυρήσῃ περὶ τοῦ φωτός."},
+            {9, "Был Свет истинный, Который просвещает всякого человека, приходящего в мир.",
+                "ἦν τὸ φῶς τὸ ἀληθινὸν ὃ φωτίζει πάντα ἄνθρωπον ἐρχόμενον εἰς τὸν κόσμον."},
+            {10, "В мире был, и мир чрез Него начал быть, и мир Его не познал.",
+                "ἐν τῷ κόσμῳ ἦν, καὶ ὁ κόσμος δι’ αὐτοῦ ἐγένετο, καὶ ὁ κόσμος αὐτὸν οὐκ ἔγνω."},
+            {11, "Пришел к своим, и свои Его не приняли.",
+                "εἰς τὰ ἴδια ἦλθεν, καὶ οἱ ἴδιοι αὐτὸν οὐ παρέλαβον."},
+            {12, "А тем, которые приняли Его, верующим во имя Его, дал власть быть чадами Божиими,",
+                "ὅσοι δὲ ἔλαβον αὐτόν, ἔδωκεν αὐτοῖς ἐξουσίαν τέκνα θεοῦ γενέσθαι, τοῖς πιστεύουσιν εἰς τὸ ὄνομα αὐτοῦ."},
+            {13, "которые ни от крови, ни от хотения плоти, ни от хотения мужа, но от Бога родились.",
+                "οἳ οὐκ ἐξ αἱμάτων οὐδὲ ἐκ θελήματος σαρκὸς οὐδὲ ἐκ θελήματος ἀνδρὸς ἀλλ’ ἐκ θεοῦ ἐγεννήθησαν."},
+            {14, "И Слово стало плотию и обитало с нами, полное благодати и истины; и мы видели славу Его, славу как Единородного от Отца.",
+                "καὶ ὁ λόγος σὰρξ ἐγένετο καὶ ἐσκήνωσεν ἐν ἡμῖν, καὶ ἐθεασάμεθα τὴν δόξαν αὐτοῦ, δόξαν ὡς μονογενοῦς παρὰ πατρός, πλήρης χάριτος καὶ ἀληθείας."},
+            {15, "Иоанн свидетельствует о Нем и, восклицая, говорит: Сей был Тот, о Котором я сказал, что Идущий за мною стал впереди меня, потому что был прежде меня.",
+                "Ἰωάννης μαρτυρεῖ περὶ αὐτοῦ καὶ κέκραγεν λέγων· οὗτος ἦν ὃν εἶπον· ὁ ὀπίσω μου ἐρχόμενος ἔμπροσθέν μου γέγονεν, ὅτι πρῶτός μου ἦν."},
+            {16, "И от полноты Его все мы приняли и благодать на благодать,",
+                "ὅτι ἐκ τοῦ πληρώματος αὐτοῦ ἡμεῖς πάντες ἐλάβομεν καὶ χάριν ἀντὶ χάριτος."},
+            {17, "ибо закон дан чрез Моисея; благодать же и истина произошли чрез Иисуса Христа.",
+                "ὅτι ὁ νόμος διὰ Μωϋσέως ἐδόθη, ἡ χάρις καὶ ἡ ἀλήθεια διὰ Ἰησοῦ Χριστοῦ ἐγένετο."},
+            {18, "Бога не видел никто никогда; Единородный Сын, сущий в недре Отчем, Он явил.",
+                "θεὸν οὐδεὶς ἑώρακεν πώποτε· μονογενὴς θεὸς ὁ ὢν εἰς τὸν κόλπον τοῦ πατρὸς ἐκεῖνος ἐξηγήσατο."},
+        };
+
+        q.prepare("INSERT INTO verses (book, chapter, verse, text, text_orig) VALUES (43, 1, ?, ?, ?)");
+        for (const auto &r : rows) {
+            q.addBindValue(r.v);
+            q.addBindValue(QString::fromUtf8(r.ru));
+            q.addBindValue(QString::fromUtf8(r.gr));
+            q.exec();
+        }
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+    return true;
+}
+
+
+################################################################################
+# FILE: src/ModuleManager.h
+################################################################################
+
+#ifndef MODULEMANAGER_H
+#define MODULEMANAGER_H
+
+#include <QObject>
+#include <QVector>
+#include <QString>
+#include "Module.h"
+
+class ModuleManager : public QObject
+{
+    Q_OBJECT
+public:
+    explicit ModuleManager(QObject *parent = nullptr);
+
+    QString modulesPath() const;
+    QVector<Module*> modules() const { return m_modules; }
+
+    bool loadModules();
+    Module* moduleByName(const QString &name) const;
+    Module* moduleAt(int index) const;
+
+    bool ensureTestModule();
+    bool importConvertedModule(const QString &sourcePath, const QString &name);
+    bool removeModule(int index);
+
+signals:
+    void modulesChanged();
+
+private:
+    QVector<Module*> m_modules;
+    QString m_modulesPath;
+};
+
+#endif // MODULEMANAGER_H
+
+################################################################################
+# FILE: src/ModuleManager.cpp
+################################################################################
+
+#include <QCoreApplication>
+#include <QFile>
+#include "ModuleManager.h"
+#include <QStandardPaths>
+#include <QDir>
+#include <QDebug>
+#include <QRegularExpression>
+#include <QFileInfo>
+#include <QHash>
+
+ModuleManager::ModuleManager(QObject *parent)
+    : QObject(parent)
+{
+    m_modulesPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modules";
+    QDir().mkpath(m_modulesPath);
+}
+
+QString ModuleManager::modulesPath() const
+{
+    return m_modulesPath;
+}
+
+bool ModuleManager::loadModules()
+{
+    // Сохраняем уже открытые Module* (по пути), чтобы панели не теряли текст
+    QHash<QString, Module*> byPath;
+    for (Module *m : m_modules) {
+        if (m)
+            byPath.insert(QDir(m->path()).absolutePath(), m);
+    }
+
+    QVector<Module*> next;
+    QDir dir(m_modulesPath);
+    const auto folders = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+
+    for (const QString &folder : folders) {
+        QString path = QDir(dir.absoluteFilePath(folder)).absolutePath();
+        if (byPath.contains(path)) {
+            next.append(byPath.take(path));
+            continue;
+        }
+        auto *mod = new Module(path);
+        if (mod->isValid())
+            next.append(mod);
+        else
+            delete mod;
+    }
+
+    // Удалить только те модули, которых больше нет на диске
+    for (Module *orphaned : byPath)
+        delete orphaned;
+
+    m_modules = next;
+    emit modulesChanged();
+    return true;
+}
+
+Module* ModuleManager::moduleByName(const QString &name) const
+{
+    for (auto *m : m_modules) {
+        if (m->name() == name)
+            return m;
+    }
+    return nullptr;
+}
+
+Module* ModuleManager::moduleAt(int index) const
+{
+    if (index >= 0 && index < m_modules.size())
+        return m_modules.at(index);
+    return nullptr;
+}
+
+bool ModuleManager::ensureTestModule()
+{
+    bool ok = true;
+
+    // Полный синодальный перевод из /usr/share/bibleapp/modules/synodal
+    QString synPath = m_modulesPath + "/synodal";
+    if (!(QDir(synPath).exists() && QFile::exists(synPath + "/data.sqlite"))) {
+        QStringList candidates;
+        candidates << "/usr/share/bibleapp/modules/synodal";
+        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/modules/synodal";
+        candidates << QCoreApplication::applicationDirPath() + "/modules/synodal";
+        for (const QString &src : candidates) {
+            if (QDir(src).exists() && QFile::exists(src + "/data.sqlite")) {
+                QDir().mkpath(synPath);
+                QFile::copy(src + "/data.sqlite", synPath + "/data.sqlite");
+                QFile::copy(src + "/module.json", synPath + "/module.json");
+                break;
+            }
+        }
+    }
+
+    QString testPath = m_modulesPath + "/synodal_test";
+    if (!(QDir(testPath).exists() && QFile::exists(testPath + "/module.json"))) {
+        if (!Module::createTestModule(testPath))
+            ok = false;
+    }
+
+    // Полный подстрочник 66 книг
+    QString ilPath = m_modulesPath + "/interlinear";
+    if (!(QDir(ilPath).exists() && QFile::exists(ilPath + "/data.sqlite"))) {
+        QStringList candidates;
+        candidates << "/usr/share/bibleapp/modules/interlinear";
+        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/modules/interlinear";
+        candidates << QCoreApplication::applicationDirPath() + "/modules/interlinear";
+        for (const QString &src : candidates) {
+            if (QDir(src).exists() && QFile::exists(src + "/data.sqlite")) {
+                QDir().mkpath(ilPath);
+                QFile::copy(src + "/data.sqlite", ilPath + "/data.sqlite");
+                QFile::copy(src + "/module.json", ilPath + "/module.json");
+                break;
+            }
+        }
+    }
+
+    loadModules();
+    return ok;
+}
+
+bool ModuleManager::importConvertedModule(const QString &sourcePath, const QString &name)
+{
+    QString safeName = name;
+    safeName.replace(QRegularExpression("[^\\w\\-]"), "_");
+    if (safeName.isEmpty())
+        safeName = "imported_module";
+
+    QString target = m_modulesPath + "/" + safeName;
+
+    // Простое копирование уже сконвертированной папки
+    QDir targetDir(target);
+    if (targetDir.exists())
+        targetDir.removeRecursively();
+
+    if (!QDir().mkpath(target))
+        return false;
+
+    QDir src(sourcePath);
+    for (const QFileInfo &fi : src.entryInfoList(QDir::Files)) {
+        QFile::copy(fi.absoluteFilePath(), target + "/" + fi.fileName());
+    }
+
+    loadModules();
+    return true;
+}
+
+bool ModuleManager::removeModule(int index)
+{
+    if (index < 0 || index >= m_modules.size())
+        return false;
+
+    Module *mod = m_modules.at(index);
+    QString path = mod->path();
+
+    // Не даём удалить, если путь не внутри нашей папки модулей
+    if (!path.startsWith(m_modulesPath))
+        return false;
+
+    delete mod;
+    m_modules.removeAt(index);
+
+    QDir dir(path);
+    if (dir.exists())
+        dir.removeRecursively();
+
+    emit modulesChanged();
+    return true;
+}
+
+
+################################################################################
+# FILE: src/ModuleManagerDialog.h
+################################################################################
+
+#ifndef MODULEMANAGERDIALOG_H
+#define MODULEMANAGERDIALOG_H
+
+#include <QDialog>
+#include "ModuleManager.h"
+#include "Converter.h"
+
+class QListWidget;
+class QLabel;
+class QPushButton;
+
+class ModuleManagerDialog : public QDialog
+{
+    Q_OBJECT
+public:
+    explicit ModuleManagerDialog(ModuleManager *manager, QWidget *parent = nullptr,
+                                 const QString &currentModuleName = QString());
+
+signals:
+    void moduleSelected(Module *module);
+
+private slots:
+    void refreshList();
+    void onConvert();
+    void onOpenSelected();
+    void onSelectionChanged();
+    void onDeleteSelected();
+
+private:
+    ModuleManager *m_manager = nullptr;
+    Converter m_converter;
+    QString m_currentModuleName;
+
+    QListWidget *m_list = nullptr;
+    QLabel *m_infoLabel = nullptr;
+    QPushButton *m_convertBtn = nullptr;
+    QPushButton *m_openBtn = nullptr;
+    QPushButton *m_deleteBtn = nullptr;
+};
+
+#endif // MODULEMANAGERDIALOG_H
+
+
+################################################################################
+# FILE: src/ModuleManagerDialog.cpp
+################################################################################
+
+#include "ModuleManagerDialog.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QListWidget>
+#include <QLabel>
+#include <QPushButton>
+#include <QFileDialog>
+#include <QMessageBox>
+#include <QProgressDialog>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <QDir>
+#include <QColor>
+#include <QFont>
+
+ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent,
+                                         const QString &currentModuleName)
+    : QDialog(parent)
+    , m_manager(manager)
+    , m_currentModuleName(currentModuleName)
+{
+    setWindowTitle(tr("Менеджер модулей"));
+    resize(560, 420);
+
+    auto *layout = new QVBoxLayout(this);
+
+    layout->addWidget(new QLabel(tr("Установленные модули:"), this));
+
+    m_list = new QListWidget(this);
+    layout->addWidget(m_list, 1);
+
+    m_infoLabel = new QLabel(this);
+    m_infoLabel->setWordWrap(true);
+    layout->addWidget(m_infoLabel);
+
+    auto *btnLayout = new QHBoxLayout;
+
+    m_convertBtn = new QPushButton(tr("Конвертировать модуль BibleQuote…"), this);
+    m_openBtn = new QPushButton(tr("Открыть выбранный"), this);
+    m_deleteBtn = new QPushButton(tr("Удалить модуль"), this);
+    auto *closeBtn = new QPushButton(tr("Закрыть"), this);
+
+    btnLayout->addWidget(m_convertBtn);
+    btnLayout->addStretch();
+    btnLayout->addWidget(m_openBtn);
+    btnLayout->addWidget(m_deleteBtn);
+    btnLayout->addWidget(closeBtn);
+
+    layout->addLayout(btnLayout);
+
+    connect(m_convertBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onConvert);
+    connect(m_openBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onOpenSelected);
+    connect(m_deleteBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onDeleteSelected);
+    connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+    connect(m_list, &QListWidget::itemSelectionChanged, this, &ModuleManagerDialog::onSelectionChanged);
+    connect(m_list, &QListWidget::itemDoubleClicked, this, [this]() { onOpenSelected(); });
+
+    refreshList();
+}
+
+void ModuleManagerDialog::refreshList()
+{
+    m_list->clear();
+    m_manager->loadModules();
+
+    QListWidgetItem *currentItem = nullptr;
+    for (int i = 0; i < m_manager->modules().size(); ++i) {
+        Module *m = m_manager->moduleAt(i);
+        auto *item = new QListWidgetItem(m->name(), m_list);
+        item->setData(Qt::UserRole, i);
+        item->setToolTip(m->description());
+        if (!m_currentModuleName.isEmpty() && m->name() == m_currentModuleName) {
+            QFont f = item->font();
+            f.setBold(true);
+            item->setFont(f);
+            item->setBackground(QColor(0xD8, 0xEB, 0xFF));
+            item->setToolTip(tr("Сейчас открыт в этом окне") + "\n" + m->description());
+            item->setText(m->name() + tr("  ← открыт"));
+            currentItem = item;
+        }
+    }
+
+    if (currentItem) {
+        m_list->setCurrentItem(currentItem);
+        m_list->scrollToItem(currentItem);
+    }
+
+    if (m_list->count() == 0) {
+        m_infoLabel->setText(tr("Нет установленных модулей. Создайте тестовый или сконвертируйте модуль из «Цитаты из Библии»."));
+    } else if (!m_currentModuleName.isEmpty()) {
+        m_infoLabel->setText(tr("Модулей: %1. Сейчас открыт: «%2»")
+                                 .arg(m_list->count()).arg(m_currentModuleName));
+    } else {
+        m_infoLabel->setText(tr("Модулей: %1").arg(m_list->count()));
+    }
+    onSelectionChanged();
+}
+
+void ModuleManagerDialog::onSelectionChanged()
+{
+    const bool has = !m_list->selectedItems().isEmpty();
+    m_openBtn->setEnabled(has);
+    if (m_deleteBtn)
+        m_deleteBtn->setEnabled(has);
+}
+
+void ModuleManagerDialog::onOpenSelected()
+{
+    auto items = m_list->selectedItems();
+    if (items.isEmpty())
+        return;
+
+    int index = items.first()->data(Qt::UserRole).toInt();
+    Module *m = m_manager->moduleAt(index);
+    if (m) {
+        emit moduleSelected(m);
+        accept();
+    }
+}
+
+void ModuleManagerDialog::onConvert()
+{
+    QString dir = QFileDialog::getExistingDirectory(this,
+        tr("Выберите папку модуля «Цитаты из Библии»"));
+
+    if (dir.isEmpty())
+        return;
+
+    auto analysis = m_converter.analyze(dir);
+    if (!analysis.success) {
+        QMessageBox::warning(this, tr("Конвертер"), analysis.message);
+        return;
+    }
+
+    QString outName = analysis.detectedName;
+    QString outPath = m_manager->modulesPath() + "/" + outName;
+
+    QProgressDialog progress(tr("Конвертация модуля…"), tr("Отмена"), 0, 100, this);
+    progress.setWindowTitle(tr("Конвертер BibleQuote"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setValue(0);
+    progress.setLabelText(tr("Подготовка…"));
+
+    QElapsedTimer timer;
+    timer.start();
+
+    QMetaObject::Connection conn = connect(
+        &m_converter, &Converter::progress, this,
+        [&](int current, int total, const QString &status) {
+            if (total <= 0) {
+                progress.setLabelText(status);
+                return;
+            }
+            int pct = qBound(0, (current * 100) / total, 100);
+            progress.setMaximum(100);
+            progress.setValue(pct);
+
+            QString eta;
+            if (current > 0 && current < total) {
+                qint64 elapsed = timer.elapsed();
+                qint64 remainMs = (elapsed * (total - current)) / current;
+                int sec = int(remainMs / 1000);
+                int min = sec / 60;
+                sec = sec % 60;
+                if (min > 0)
+                    eta = tr("Осталось ~%1 мин %2 сек").arg(min).arg(sec);
+                else
+                    eta = tr("Осталось ~%1 сек").arg(sec);
+            } else if (current >= total) {
+                eta = tr("Завершение…");
+            }
+
+            progress.setLabelText(
+                tr("%1%\nКнига %2 из %3\n%4\n%5")
+                    .arg(pct)
+                    .arg(current)
+                    .arg(total)
+                    .arg(status)
+                    .arg(eta));
+            QCoreApplication::processEvents();
+        });
+
+    auto result = m_converter.convert(dir, outPath);
+    disconnect(conn);
+    progress.setValue(100);
+    progress.close();
+
+    if (result.success) {
+        QMessageBox::information(this, tr("Конвертер"), result.message);
+        refreshList();
+    } else {
+        QMessageBox::warning(this, tr("Конвертер"), result.message);
+    }
+}
+
+void ModuleManagerDialog::onDeleteSelected()
+{
+    auto items = m_list->selectedItems();
+    if (items.isEmpty())
+        return;
+
+    int index = items.first()->data(Qt::UserRole).toInt();
+    Module *m = m_manager->moduleAt(index);
+    if (!m)
+        return;
+
+    const auto ans = QMessageBox::question(
+        this,
+        tr("Удаление модуля"),
+        tr("Удалить модуль «%1» с диска?\nЭто действие нельзя отменить.").arg(m->name()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+
+    if (ans != QMessageBox::Yes)
+        return;
+
+    if (m_manager->removeModule(index)) {
+        refreshList();
+        m_infoLabel->setText(tr("Модуль удалён."));
+    } else {
+        QMessageBox::warning(this, tr("Удаление"),
+            tr("Не удалось удалить модуль. Возможно, это встроенный модуль без права на удаление."));
+    }
+}
+
+
+################################################################################
+# FILE: src/Converter.h
+################################################################################
+
+#ifndef CONVERTER_H
+#define CONVERTER_H
+
+#include <QString>
+#include <QObject>
+
+struct ConversionResult {
+    bool success = false;
+    QString message;
+    QString outputPath;
+    QString detectedName;
+    QString detectedType;
+};
+
+class Converter : public QObject
+{
+    Q_OBJECT
+public:
+    explicit Converter(QObject *parent = nullptr);
+
+    ConversionResult analyze(const QString &bibleQuoteModulePath) const;
+
+    // Конвертация с сигналом progress(currentBook, totalBooks, statusText)
+    ConversionResult convert(const QString &bibleQuoteModulePath, const QString &outputDir);
+
+signals:
+    void progress(int current, int total, const QString &status);
+
+private:
+    bool isLikelyBibleQuoteModule(const QString &path) const;
+};
+
+#endif // CONVERTER_H
+
+
+################################################################################
+# FILE: src/Converter.cpp
+################################################################################
+
+#include "Converter.h"
+#include <QDir>
+#include <QCoreApplication>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QUuid>
+#include <QDebug>
+#include <QRegularExpression>
+#include <QStringDecoder>
+#include <QSet>
+#include <algorithm>
+
+Converter::Converter(QObject *parent)
+    : QObject(parent)
+{
+}
+
+static QString findIniFile(const QString &path)
+{
+    QDir dir(path);
+    const QStringList candidates = {"BibleQt.ini", "bibleqt.ini", "BIBLEQT.INI", "BibleQT.ini"};
+    for (const QString &name : candidates) {
+        if (dir.exists(name))
+            return dir.absoluteFilePath(name);
+    }
+    const auto files = dir.entryList({"*.ini", "*.INI"}, QDir::Files);
+    if (!files.isEmpty())
+        return dir.absoluteFilePath(files.first());
+    return {};
+}
+
+bool Converter::isLikelyBibleQuoteModule(const QString &path) const
+{
+    return !findIniFile(path).isEmpty();
+}
+
+static QString decodeBytes(const QByteArray &data)
+{
+    if (data.startsWith("\xFF\xFE") || data.startsWith("\xFE\xFF")) {
+        QStringDecoder dec(QStringDecoder::Utf16);
+        return dec(data);
+    }
+    QString utf8 = QString::fromUtf8(data);
+    if (!utf8.contains(QChar::ReplacementCharacter))
+        return utf8;
+    QStringDecoder dec1251("Windows-1251");
+    if (dec1251.isValid())
+        return dec1251(data);
+    return utf8;
+}
+
+static QMap<QString, QString> parseIni(const QString &iniPath)
+{
+    QMap<QString, QString> map;
+    QFile f(iniPath);
+    if (!f.open(QIODevice::ReadOnly))
+        return map;
+    QString content = decodeBytes(f.readAll());
+    for (const QString &rawLine : content.split(QRegularExpression("[\r\n]+"))) {
+        QString line = rawLine.trimmed();
+        if (line.isEmpty() || line.startsWith(";") || line.startsWith("#"))
+            continue;
+        if (line.startsWith("[") && line.endsWith("]"))
+            continue;
+        int eq = line.indexOf('=');
+        if (eq > 0)
+            map[line.left(eq).trimmed()] = line.mid(eq + 1).trimmed();
+    }
+    return map;
+}
+
+ConversionResult Converter::analyze(const QString &bibleQuoteModulePath) const
+{
+    ConversionResult result;
+    if (!QDir(bibleQuoteModulePath).exists()) {
+        result.message = QString::fromUtf8("Папка не существует");
+        return result;
+    }
+    QString iniPath = findIniFile(bibleQuoteModulePath);
+    if (iniPath.isEmpty()) {
+        result.message = QString::fromUtf8("Не найден файл BibleQt.ini");
+        return result;
+    }
+    auto ini = parseIni(iniPath);
+    result.success = true;
+    result.detectedName = ini.value("BibleName", QFileInfo(bibleQuoteModulePath).fileName());
+    result.detectedType = (ini.value("Bible", "Y").toUpper() == "N") ? "book" : "bible";
+    result.message = QString::fromUtf8("Модуль распознан: «%1»").arg(result.detectedName);
+    return result;
+}
+
+static QString htmlToPlainKeepLines(QString html)
+{
+    static const QRegularExpression reScript(
+        QStringLiteral("<script[^>]*>.*?</script>"),
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression reStyle(
+        QStringLiteral("<style[^>]*>.*?</style>"),
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression reBr(QStringLiteral("<br\\s*/?>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reP(QStringLiteral("</p>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reDiv(QStringLiteral("</div>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reH(QStringLiteral("</h[1-6]>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reSup(
+        QStringLiteral("<(?:sup|b|strong)[^>]*>\\s*(\\d{1,3})\\s*</(?:sup|b|strong)>"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reTag(QStringLiteral("<[^>]+>"));
+    static const QRegularExpression reSpace(QStringLiteral("[\\t\\r]+"));
+    // После очистки HTML: номер стиха перед заглавной буквой / « / "
+    static const QRegularExpression reVerseBreak(
+        QStringLiteral(R"((?:^|[\s>])(\d{1,3})([\.\)\:])\s*(?=[«"A-ZA-ЯЁа-яё]))"),
+        QRegularExpression::MultilineOption);
+    static const QRegularExpression reVerseBreakSp(
+        QStringLiteral(R"((?:^|[\n\r])[ \t]*(\d{1,3})[ \t]+(?=[«"A-ZA-ЯЁа-яёA-Za-z]))"),
+        QRegularExpression::MultilineOption);
+
+    html.replace(reScript, QStringLiteral(" "));
+    html.replace(reStyle, QStringLiteral(" "));
+    html.replace(reBr, QStringLiteral("\n"));
+    html.replace(reP, QStringLiteral("\n"));
+    html.replace(reDiv, QStringLiteral("\n"));
+    html.replace(reH, QStringLiteral("\n"));
+    html.replace(reSup, QStringLiteral("\n\\1. "));
+    html.replace(reTag, QStringLiteral(" "));
+    html.replace(QChar(0x00A0), QChar(' '));
+    html.replace(reSpace, QStringLiteral(" "));
+
+    // Принудительно каждый стих с новой строки: "1. Текст 2. Текст" -> раздельно
+    {
+        static const QRegularExpression reInlineVerse(
+            QStringLiteral(R"(([^\n])[ \t]+(\d{1,3})([\.\)\:])[ \t]*(?=[«"A-Za-zА-Яа-яЁё]))"));
+        html.replace(reInlineVerse, QStringLiteral("\\1\n\\2\\3 "));
+    }
+    {
+        static const QRegularExpression reInlineVerseSp(
+            QStringLiteral(R"(([^\n\.])[ \t]+(\d{1,3})[ \t]+(?=[«"А-ЯA-ZЁ]))"));
+        html.replace(reInlineVerseSp, QStringLiteral("\\1\n\\2 "));
+    }
+
+    QStringList lines = html.split(QChar('\n'));
+    QStringList out;
+    out.reserve(lines.size());
+    for (QString line : lines) {
+        line = line.simplified();
+        if (!line.isEmpty())
+            out << line;
+    }
+    return out.join(QChar('\n'));
+}
+
+
+// Убрать в конце куска «голый» номер следующей главы (строка из одних цифр)
+static QString stripTrailingChapterNumber(QString text)
+{
+    static const QRegularExpression reTail(
+        QStringLiteral(R"([\s\r\n]+(\d{1,3})\s*$)"));
+    // повторяем: иногда два номера подряд
+    for (int k = 0; k < 3; ++k) {
+        auto m = reTail.match(text);
+        if (!m.hasMatch())
+            break;
+        // не трогаем, если весь текст — короткий номер
+        QString core = text.left(m.capturedStart()).trimmed();
+        if (core.length() < 8)
+            break;
+        text = core;
+    }
+    // убрать последнюю строку, если она только число
+    static const QRegularExpression reLastLine(
+        QStringLiteral(R"((?:^|[\r\n])[ \t]*(\d{1,3})[ \t]*$)"));
+    auto m2 = reLastLine.match(text);
+    if (m2.hasMatch() && m2.capturedStart() > 0) {
+        QString core = text.left(m2.capturedStart()).trimmed();
+        if (core.length() >= 8)
+            text = core;
+    }
+    return text.trimmed();
+}
+
+// Убрать ведущий номер главы в начале куска («2» перед стихами главы 2)
+static QString stripLeadingChapterNumber(QString text, int chapterNum)
+{
+    if (chapterNum <= 0)
+        return text.trimmed();
+    // строка только с номером главы
+    QRegularExpression reLead(
+        QStringLiteral(R"(^[ \t]*%1[ \t]*(?:[\r\n]+|$))").arg(chapterNum));
+    text.replace(reLead, QString());
+    // «Глава N»
+    static const QRegularExpression reGlava(
+        QStringLiteral(R"(^[ \t]*(?:Глава|Chapter|Psalm)\s+\d{1,3}\b[ \t]*)"),
+        QRegularExpression::CaseInsensitiveOption);
+    text.replace(reGlava, QString());
+    return text.trimmed();
+}
+
+static int insertVerseRow(QSqlQuery &q, int bookId, int chapter, int verse, const QString &text)
+{
+    QString t = stripTrailingChapterNumber(text.simplified());
+    // если после очистки остался только номер — не пишем
+    if (t.length() < 2)
+        return 0;
+    {
+        static const QRegularExpression onlyNum(QStringLiteral(R"(^\d{1,3}$)"));
+        if (onlyNum.match(t).hasMatch())
+            return 0;
+    }
+    q.bindValue(0, bookId);
+    q.bindValue(1, chapter);
+    q.bindValue(2, verse);
+    q.bindValue(3, t);
+    return q.exec() ? 1 : 0;
+}
+
+static int parseVersesInChapter(const QString &chapterPlain, int bookId, int chapter, QSqlQuery &insertQuery)
+{
+    int count = 0;
+    QRegularExpression splitRe(
+        QString::fromUtf8("(?:^|[\\n\\r])\\s*(\\d{1,3})(?:[\\.\\)\\:]|\\s+)(?=\\S)"),
+        QRegularExpression::MultilineOption);
+
+    QList<int> numbers;
+    QList<int> starts;
+    QList<int> markerStarts;
+
+    auto it = splitRe.globalMatch(chapterPlain);
+    while (it.hasNext()) {
+        auto m = it.next();
+        int num = m.captured(1).toInt();
+        if (num <= 0 || num > 300)
+            continue;
+        numbers.append(num);
+        markerStarts.append(m.capturedStart());
+        starts.append(m.capturedEnd());
+    }
+
+    if (numbers.isEmpty()) {
+        QString all = chapterPlain.simplified();
+        if (all.length() > 5)
+            count += insertVerseRow(insertQuery, bookId, chapter, 1, all);
+        return count;
+    }
+
+    for (int i = 0; i < numbers.size(); ++i) {
+        int from = starts[i];
+        int to = (i + 1 < markerStarts.size()) ? markerStarts[i + 1] : chapterPlain.size();
+        if (to < from) to = chapterPlain.size();
+        QString verseText = chapterPlain.mid(from, to - from).trimmed();
+        verseText.replace(QRegularExpression(QString::fromUtf8("\\s+")), " ");
+        count += insertVerseRow(insertQuery, bookId, chapter, numbers[i], verseText);
+    }
+    return count;
+}
+
+struct ChMark {
+    int num = 0;
+    int pos = 0;
+};
+
+
+
+
+
+
+
+// Разбор книги BibleQuote. expectedChapters — ChapterQty из .ini.
+static void parseBookHtml(const QString &htmlPath, int bookId, QSqlQuery &insertQuery,
+                          int &chaptersOut, int expectedChapters)
+{
+    QFile f(htmlPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        chaptersOut = 0;
+        return;
+    }
+
+    const QString content = decodeBytes(f.readAll());
+    chaptersOut = 0;
+
+    auto writeRows = [&](const QList<QPair<int, QPair<int, QString>>> &rows) {
+        // rows: chapter, verse, text
+        int maxCh = 0;
+        for (const auto &row : rows) {
+            const int ch = row.first;
+            const int vs = row.second.first;
+            const QString &tx = row.second.second;
+            if (insertVerseRow(insertQuery, bookId, ch, vs, tx) > 0 && ch > maxCh)
+                maxCh = ch;
+        }
+        chaptersOut = maxCh;
+    };
+
+    // ---------- 1) Главный способ BibleQuote: <a name=N> или <a name="N"> = ГЛАВА ----------
+    {
+        // name=1, name="1", name='1', name=01
+        static const QRegularExpression reName(
+            QStringLiteral(R"(<a\s+[^>]*\bname\s*=\s*["']?(\d{1,3})["']?[^>]*>)"),
+            QRegularExpression::CaseInsensitiveOption);
+
+        struct Mark { int num; int pos; };
+        QList<Mark> marks;
+        auto it = reName.globalMatch(content);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int n = m.captured(1).toInt();
+            if (n >= 0 && n <= 200)
+                marks.append({n, (int)m.capturedStart()});
+        }
+
+        if (marks.size() >= 2) {
+            std::sort(marks.begin(), marks.end(), [](const Mark &a, const Mark &b) {
+                return a.pos < b.pos;
+            });
+            // уникальные номера по первому вхождению
+            QList<Mark> uniq;
+            QSet<int> seen;
+            for (const auto &m : marks) {
+                if (seen.contains(m.num))
+                    continue;
+                seen.insert(m.num);
+                uniq.append(m);
+            }
+
+            int maxN = 0;
+            for (const auto &m : uniq) if (m.num > maxN) maxN = m.num;
+
+            // 0-based (0..49 при ChapterQty=50)
+            const bool zeroBased = seen.contains(0)
+                                   && (expectedChapters <= 1
+                                       || maxN == expectedChapters - 1
+                                       || uniq.size() == expectedChapters);
+
+            // Это главы, а не стихи, если:
+            // - число якорей близко к ChapterQty, ИЛИ
+            // - якорей немного (2..180) и expected неизвестен/совпадает по масштабу
+            bool asChapters = false;
+            if (expectedChapters >= 2) {
+                asChapters = (uniq.size() >= qMax(2, expectedChapters * 2 / 3)
+                              && uniq.size() <= expectedChapters + 10
+                              && maxN <= expectedChapters + 5);
+            } else {
+                // без ChapterQty: до 180 якорей и не «каждый стих» (стихов обычно >200)
+                asChapters = uniq.size() >= 2 && uniq.size() <= 180;
+            }
+
+            if (asChapters) {
+                QList<QPair<int, QPair<int, QString>>> rows;
+                int chaptersWithText = 0;
+                for (int i = 0; i < uniq.size(); ++i) {
+                    int ch = zeroBased ? uniq[i].num + 1 : uniq[i].num;
+                    if (ch < 1) ch = 1;
+                    int from = uniq[i].pos;
+                    int to = (i + 1 < uniq.size()) ? uniq[i + 1].pos : content.size();
+                    QString chunk = htmlToPlainKeepLines(content.mid(from, to - from));
+                    chunk = stripLeadingChapterNumber(chunk, ch);
+                    chunk = stripTrailingChapterNumber(chunk);
+
+                    // стихи внутри главы
+                    static const QRegularExpression vRe(
+                        QStringLiteral(R"((?:^|[\n\r])[ \t]*(\d{1,3})(?:[\.\)\:]|[ \t]+)(?=\S))"),
+                        QRegularExpression::MultilineOption);
+                    QList<int> nums, starts, mstarts;
+                    auto vit = vRe.globalMatch(chunk);
+                    while (vit.hasNext()) {
+                        auto vm = vit.next();
+                        int num = vm.captured(1).toInt();
+                        if (num <= 0 || num > 300) continue;
+                        nums.append(num);
+                        mstarts.append((int)vm.capturedStart());
+                        starts.append((int)vm.capturedEnd());
+                    }
+                    if (nums.isEmpty()) {
+                        // попробовать внутри строки
+                        static const QRegularExpression vLoose(
+                            QStringLiteral(R"((?:^|[\s])(\d{1,3})[\.\)\:][ \t]*(?=\S))"),
+                            QRegularExpression::MultilineOption);
+                        auto vit2 = vLoose.globalMatch(chunk);
+                        while (vit2.hasNext()) {
+                            auto vm = vit2.next();
+                            int num = vm.captured(1).toInt();
+                            if (num <= 0 || num > 300) continue;
+                            nums.append(num);
+                            mstarts.append((int)vm.capturedStart());
+                            starts.append((int)vm.capturedEnd());
+                        }
+                    }
+
+                    bool any = false;
+                    if (!nums.isEmpty()) {
+                        for (int j = 0; j < nums.size(); ++j) {
+                            int a = starts[j];
+                            int b = (j + 1 < mstarts.size()) ? mstarts[j + 1] : chunk.size();
+                            if (b < a) b = chunk.size();
+                            QString vt = chunk.mid(a, b - a).simplified();
+                            if (vt.length() >= 2) {
+                                rows.append({ch, {nums[j], vt}});
+                                any = true;
+                            }
+                        }
+                    } else {
+                        QString all = chunk.simplified();
+                        if (all.length() > 5) {
+                            rows.append({ch, {1, all}});
+                            any = true;
+                        }
+                    }
+                    if (any) chaptersWithText++;
+                }
+
+                // Принимаем, если хотя бы 2 главы с текстом
+                if (chaptersWithText >= 2 || (expectedChapters <= 1 && chaptersWithText >= 1)) {
+                    writeRows(rows);
+                    return;
+                }
+            }
+        }
+    }
+
+    // ---------- 2) Заголовки «Глава N» ----------
+    {
+        const QString plain = htmlToPlainKeepLines(content);
+        static const QRegularExpression reHead(
+            QStringLiteral(R"((?:^|[\n\r])[ \t]*(?:Глава|ГЛАВА|Chapter|CHAPTER|Psalm)\s+(\d{1,3})\b)"),
+            QRegularExpression::MultilineOption);
+        struct Mark { int num; int pos; };
+        QList<Mark> headers;
+        auto it = reHead.globalMatch(plain);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int n = m.captured(1).toInt();
+            if (n >= 1 && n <= 200)
+                headers.append({n, (int)m.capturedStart()});
+        }
+        if (headers.size() >= 2) {
+            std::sort(headers.begin(), headers.end(), [](const Mark &a, const Mark &b) {
+                return a.pos < b.pos;
+            });
+            QList<QPair<int, QPair<int, QString>>> rows;
+            QSet<int> seen;
+            QList<Mark> uniq;
+            for (const auto &h : headers) {
+                if (seen.contains(h.num)) continue;
+                seen.insert(h.num);
+                uniq.append(h);
+            }
+            for (int i = 0; i < uniq.size(); ++i) {
+                int ch = uniq[i].num;
+                int from = uniq[i].pos;
+                int to = (i + 1 < uniq.size()) ? uniq[i + 1].pos : plain.size();
+                QString chunk = plain.mid(from, to - from);
+                static const QRegularExpression vRe(
+                    QStringLiteral(R"((?:^|[\n\r])[ \t]*(\d{1,3})(?:[\.\)\:]|[ \t]+)(?=\S))"),
+                    QRegularExpression::MultilineOption);
+                QList<int> nums, starts, mstarts;
+                auto vit = vRe.globalMatch(chunk);
+                while (vit.hasNext()) {
+                    auto vm = vit.next();
+                    int num = vm.captured(1).toInt();
+                    if (num <= 0 || num > 300) continue;
+                    nums.append(num);
+                    mstarts.append((int)vm.capturedStart());
+                    starts.append((int)vm.capturedEnd());
+                }
+                if (nums.isEmpty()) {
+                    QString all = chunk.simplified();
+                    if (all.length() > 5)
+                        rows.append({ch, {1, all}});
+                } else {
+                    for (int j = 0; j < nums.size(); ++j) {
+                        int a = starts[j];
+                        int b = (j + 1 < mstarts.size()) ? mstarts[j + 1] : chunk.size();
+                        QString vt = chunk.mid(a, b - a).simplified();
+                        if (vt.length() >= 2)
+                            rows.append({ch, {nums[j], vt}});
+                    }
+                }
+            }
+            if (!rows.isEmpty()) {
+                writeRows(rows);
+                return;
+            }
+        }
+    }
+
+    // ---------- 3) Сброс номера стиха: ... 30, 31, 1 ... = новая глава ----------
+    {
+        const QString plain = htmlToPlainKeepLines(content);
+        static const QRegularExpression vRe(
+            QStringLiteral(R"((?:^|[\n\r])[ \t]*(\d{1,3})(?:[\.\)\:]|[ \t]+)(?=\S))"),
+            QRegularExpression::MultilineOption);
+        struct V { int num; int start; int mstart; };
+        QList<V> vmarks;
+        auto it = vRe.globalMatch(plain);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int num = m.captured(1).toInt();
+            if (num <= 0 || num > 300) continue;
+            vmarks.append({num, (int)m.capturedEnd(), (int)m.capturedStart()});
+        }
+        if (vmarks.size() >= 2) {
+            QList<QPair<int, QPair<int, QString>>> rows;
+            int chapter = 1;
+            for (int i = 0; i < vmarks.size(); ++i) {
+                if (i > 0) {
+                    int prev = vmarks[i - 1].num;
+                    int cur = vmarks[i].num;
+                    if (cur == 1 && prev >= 1)
+                        chapter++;
+                    else if (cur < prev && cur <= 2 && prev >= 5)
+                        chapter++;
+                }
+                int from = vmarks[i].start;
+                int to = (i + 1 < vmarks.size()) ? vmarks[i + 1].mstart : plain.size();
+                QString vt = plain.mid(from, to - from).simplified();
+                if (vt.length() >= 2)
+                    rows.append({chapter, {vmarks[i].num, vt}});
+            }
+            // если получилась только 1 глава при ожидаемых многих — не возвращаемся раньше времени
+            int maxCh = 0;
+            for (const auto &r : rows) if (r.first > maxCh) maxCh = r.first;
+            if (maxCh >= 2 || expectedChapters <= 1) {
+                writeRows(rows);
+                return;
+            }
+        }
+    }
+
+    // ---------- 4) Всё одной главой ----------
+    {
+        const QString plain = htmlToPlainKeepLines(content);
+        QList<QPair<int, QPair<int, QString>>> rows;
+        static const QRegularExpression vRe(
+            QStringLiteral(R"((?:^|[\n\r])[ \t]*(\d{1,3})(?:[\.\)\:]|[ \t]+)(?=\S))"),
+            QRegularExpression::MultilineOption);
+        QList<int> nums, starts, mstarts;
+        auto it = vRe.globalMatch(plain);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int num = m.captured(1).toInt();
+            if (num <= 0 || num > 300) continue;
+            nums.append(num);
+            mstarts.append((int)m.capturedStart());
+            starts.append((int)m.capturedEnd());
+        }
+        if (nums.isEmpty()) {
+            QString all = plain.simplified();
+            if (all.length() > 5)
+                rows.append({1, {1, all}});
+        } else {
+            for (int j = 0; j < nums.size(); ++j) {
+                int a = starts[j];
+                int b = (j + 1 < mstarts.size()) ? mstarts[j + 1] : plain.size();
+                QString vt = plain.mid(a, b - a).simplified();
+                if (vt.length() >= 2)
+                    rows.append({1, {nums[j], vt}});
+            }
+        }
+        writeRows(rows);
+    }
+}
+
+ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const QString &outputDir)
+{
+    ConversionResult result = analyze(bibleQuoteModulePath);
+    if (!result.success)
+        return result;
+
+    QString iniPath = findIniFile(bibleQuoteModulePath);
+    auto ini = parseIni(iniPath);
+    QDir().mkpath(outputDir);
+
+    QJsonObject meta;
+    meta["name"] = result.detectedName;
+    meta["description"] = ini.value("Copyright", QString::fromUtf8("Сконвертировано из Цитаты из Библии"));
+    meta["type"] = result.detectedType;
+    meta["language"] = ini.value("Language", "ru");
+    meta["version"] = "0.3";
+    meta["source"] = "biblequote";
+    meta["short_name"] = ini.value("BibleShortName", "");
+
+    QFile metaFile(outputDir + "/module.json");
+    if (!metaFile.open(QIODevice::WriteOnly)) {
+        result.success = false;
+        result.message = QString::fromUtf8("Не удалось создать module.json");
+        return result;
+    }
+    metaFile.write(QJsonDocument(meta).toJson(QJsonDocument::Indented));
+    metaFile.close();
+
+    QString connName = "converter_" + QUuid::createUuid().toString();
+    int totalVerses = 0;
+    int totalBooks = 0;
+
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(outputDir + "/data.sqlite");
+        if (!db.open()) {
+            result.success = false;
+            result.message = QString::fromUtf8("Не удалось создать базу данных");
+            QSqlDatabase::removeDatabase(connName);
+            return result;
+        }
+
+        QSqlQuery q(db);
+        q.exec("PRAGMA synchronous = OFF");
+        q.exec("PRAGMA journal_mode = MEMORY");
+        q.exec("PRAGMA temp_store = MEMORY");
+        q.exec("BEGIN");
+        q.exec("CREATE TABLE books (id INTEGER PRIMARY KEY, short_name TEXT, full_name TEXT, chapters INTEGER)");
+        q.exec("CREATE TABLE verses (book INTEGER, chapter INTEGER, verse INTEGER, text TEXT, PRIMARY KEY(book, chapter, verse))");
+
+        QStringList pathNames, fullNames, shortNames, chapterQtys;
+
+        QFile iniFile(iniPath);
+        if (iniFile.open(QIODevice::ReadOnly)) {
+            QString content = decodeBytes(iniFile.readAll());
+            QString curPath, curFull, curShort, curQty;
+            for (const QString &rawLine : content.split(QRegularExpression("[\r\n]+"))) {
+                QString line = rawLine.trimmed();
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                QString key = line.left(eq).trimmed().toLower();
+                QString value = line.mid(eq + 1).trimmed();
+
+                if (key == "pathname") {
+                    if (!curPath.isEmpty()) {
+                        pathNames << curPath;
+                        fullNames << curFull;
+                        shortNames << curShort;
+                        chapterQtys << curQty;
+                    }
+                    curPath = value;
+                    curFull.clear(); curShort.clear(); curQty.clear();
+                } else if (key == "fullname") curFull = value;
+                else if (key == "shortname") curShort = value;
+                else if (key == "chapterqty") curQty = value;
+            }
+            if (!curPath.isEmpty()) {
+                pathNames << curPath;
+                fullNames << curFull;
+                shortNames << curShort;
+                chapterQtys << curQty;
+            }
+        }
+
+        QSqlQuery insertBook(db);
+        insertBook.prepare("INSERT INTO books (id, short_name, full_name, chapters) VALUES (?, ?, ?, ?)");
+        QSqlQuery insertVerse(db);
+        insertVerse.prepare("INSERT OR REPLACE INTO verses (book, chapter, verse, text) VALUES (?, ?, ?, ?)");
+
+        emit progress(0, pathNames.size(), QString::fromUtf8("Начало конвертации…"));
+        QCoreApplication::processEvents();
+
+        for (int i = 0; i < pathNames.size(); ++i) {
+            int bookId = i + 1;
+            QString pathName = pathNames[i];
+            QString fullName = fullNames.value(i, QString::fromUtf8("Книга %1").arg(bookId));
+            QString shortName = shortNames.value(i, QString::number(bookId));
+            int chapters = chapterQtys.value(i, "1").toInt();
+            if (chapters <= 0) chapters = 1;
+
+            QString htmlPath = bibleQuoteModulePath + "/" + pathName;
+            auto tryFind = [&](const QString &basePath) -> QString {
+                if (QFile::exists(basePath))
+                    return basePath;
+                QFileInfo fi(basePath);
+                QDir dir(fi.absolutePath().isEmpty() ? bibleQuoteModulePath : fi.absolutePath());
+                if (!dir.exists())
+                    dir = QDir(bibleQuoteModulePath);
+                const QString stem = fi.completeBaseName();
+                const QStringList patterns = {
+                    fi.fileName(),
+                    stem + ".htm", stem + ".html", stem + ".HTM", stem + ".HTML",
+                    stem + ".HtM", pathName, QFileInfo(pathName).fileName()
+                };
+                for (const QString &pat : patterns) {
+                    const auto lst = dir.entryList(QStringList() << pat, QDir::Files | QDir::Readable);
+                    if (!lst.isEmpty())
+                        return dir.absoluteFilePath(lst.first());
+                }
+                // без учёта регистра
+                const auto all = dir.entryList(QDir::Files);
+                for (const QString &fn : all) {
+                    if (fn.compare(fi.fileName(), Qt::CaseInsensitive) == 0
+                        || QFileInfo(fn).completeBaseName().compare(stem, Qt::CaseInsensitive) == 0)
+                        return dir.absoluteFilePath(fn);
+                }
+                // рекурсивно
+                QDirIterator it(bibleQuoteModulePath, QStringList() << fi.fileName() << (stem + ".*"),
+                                QDir::Files, QDirIterator::Subdirectories);
+                while (it.hasNext()) {
+                    QString p = it.next();
+                    QString b = QFileInfo(p).completeBaseName();
+                    if (b.compare(stem, Qt::CaseInsensitive) == 0)
+                        return p;
+                }
+                return QString();
+            };
+            if (!QFile::exists(htmlPath)) {
+                QString found = tryFind(htmlPath);
+                if (found.isEmpty())
+                    found = tryFind(bibleQuoteModulePath + "/" + QFileInfo(pathName).fileName());
+                if (!found.isEmpty())
+                    htmlPath = found;
+            }
+
+            int parsedChapters = 0;
+            if (QFile::exists(htmlPath))
+                parseBookHtml(htmlPath, bookId, insertVerse, parsedChapters, chapters);
+
+            int bookVerses = 0;
+            int actualMax = 0;
+            {
+                QSqlQuery cq(db);
+                cq.prepare(QStringLiteral("SELECT COUNT(*), COALESCE(MAX(chapter),0) FROM verses WHERE book = ?"));
+                cq.bindValue(0, bookId);
+                if (cq.exec() && cq.next()) {
+                    bookVerses = cq.value(0).toInt();
+                    actualMax = cq.value(1).toInt();
+                }
+            }
+            // В books.chapters пишем только реально существующие главы
+            if (actualMax > 0)
+                chapters = actualMax;
+            else if (parsedChapters > 0)
+                chapters = parsedChapters;
+            else
+                chapters = 1;
+
+            insertBook.bindValue(0, bookId);
+            insertBook.bindValue(1, shortName);
+            insertBook.bindValue(2, fullName);
+            insertBook.bindValue(3, chapters);
+            insertBook.exec();
+            totalBooks++;
+            totalVerses += bookVerses;
+            emit progress(totalBooks, pathNames.size(),
+                          QString::fromUtf8("%1 (%2 гл., %3 ст.)")
+                              .arg(fullName).arg(chapters).arg(bookVerses));
+            QCoreApplication::processEvents();
+        }
+
+        if (totalVerses == 0 && totalBooks == 0) {
+            insertBook.bindValue(0, 1);
+            insertBook.bindValue(1, QString::fromUtf8("Инфо"));
+            insertBook.bindValue(2, QString::fromUtf8("Информация"));
+            insertBook.bindValue(3, 1);
+            insertBook.exec();
+            insertVerse.bindValue(0, 1);
+            insertVerse.bindValue(1, 1);
+            insertVerse.bindValue(2, 1);
+            insertVerse.bindValue(3, QString::fromUtf8(
+                "Модуль «%1» распознан, но текст извлечь не удалось.").arg(result.detectedName));
+            insertVerse.exec();
+            totalBooks = 1;
+        }
+        q.exec("CREATE INDEX IF NOT EXISTS idx_verses_book_chapter ON verses(book, chapter)");
+        q.exec("COMMIT");
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    result.success = true;
+    result.outputPath = outputDir;
+    result.message = QString::fromUtf8("Модуль «%1» сконвертирован.\nКниг: %2\nСтихов: %3")
+                         .arg(result.detectedName).arg(totalBooks).arg(totalVerses);
+    return result;
+}
+
+
+################################################################################
+# FILE: src/TitleBar.h
+################################################################################
+
+#ifndef TITLEBAR_H
+#define TITLEBAR_H
+
+#include <QWidget>
+#include <QLabel>
+#include <QPushButton>
+#include <QHBoxLayout>
+
+class TitleBar : public QWidget
+{
+    Q_OBJECT
+
+public:
+    enum ControlsPosition { Left, Right };
+
+    explicit TitleBar(QWidget *parent = nullptr);
+
+    void setControlsPosition(ControlsPosition pos);
+    ControlsPosition controlsPosition() const { return m_position; }
+
+    void setTitle(const QString &title);
+    void setMaximized(bool maximized);
+    void updateSystemStyle();
+
+signals:
+    void minimizeClicked();
+    void maximizeClicked();
+    void closeClicked();
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void paintEvent(QPaintEvent *event) override;
+    void changeEvent(QEvent *event) override;
+
+private:
+    void rebuildLayout();
+    QString buttonStyle(bool isClose = false) const;
+
+    QLabel *m_titleLabel;
+    QPushButton *m_minimizeBtn;
+    QPushButton *m_maximizeBtn;
+    QPushButton *m_closeBtn;
+    QHBoxLayout *m_layout;
+
+    ControlsPosition m_position = Right;
+    QPoint m_dragPos;
+    bool m_isMaximized = false;
+};
+
+#endif
+
+
+################################################################################
+# FILE: src/TitleBar.cpp
+################################################################################
+
+#include "TitleBar.h"
+#include <QMouseEvent>
+#include <QPainter>
+#include <QStyleOption>
+#include <QApplication>
+#include <QStyle>
+
+TitleBar::TitleBar(QWidget *parent)
+    : QWidget(parent)
+{
+    setFixedHeight(38);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    m_titleLabel = new QLabel(QString::fromUtf8("Программа для изучения БИБЛИИ"), this);
+    m_titleLabel->setAlignment(Qt::AlignCenter);
+    m_titleLabel->setStyleSheet("font-weight: 600; font-size: 13px;");
+
+    m_minimizeBtn = new QPushButton(this);
+    m_maximizeBtn = new QPushButton(this);
+    m_closeBtn = new QPushButton(this);
+
+    m_minimizeBtn->setFixedSize(46, 34);
+    m_maximizeBtn->setFixedSize(46, 34);
+    m_closeBtn->setFixedSize(46, 34);
+
+    m_minimizeBtn->setToolTip(QString::fromUtf8("Свернуть"));
+    m_maximizeBtn->setToolTip(QString::fromUtf8("Развернуть"));
+    m_closeBtn->setToolTip(QString::fromUtf8("Закрыть"));
+
+    m_minimizeBtn->setText("–");
+    m_maximizeBtn->setText("□");
+    m_closeBtn->setText("×");
+    m_minimizeBtn->setFlat(true);
+    m_maximizeBtn->setFlat(true);
+    m_closeBtn->setFlat(true);
+
+    connect(m_minimizeBtn, &QPushButton::clicked, this, &TitleBar::minimizeClicked);
+    connect(m_maximizeBtn, &QPushButton::clicked, this, &TitleBar::maximizeClicked);
+    connect(m_closeBtn, &QPushButton::clicked, this, &TitleBar::closeClicked);
+
+    m_layout = new QHBoxLayout(this);
+    m_layout->setContentsMargins(6, 0, 6, 0);
+    m_layout->setSpacing(0);
+
+    rebuildLayout();
+    updateSystemStyle();
+}
+
+void TitleBar::updateSystemStyle()
+{
+    // Наследуем цвета системы
+    setAutoFillBackground(true);
+    QPalette pal = QApplication::palette();
+    setPalette(pal);
+    m_titleLabel->setPalette(pal);
+    rebuildLayout();
+}
+
+void TitleBar::setControlsPosition(ControlsPosition pos)
+{
+    if (m_position == pos)
+        return;
+    m_position = pos;
+    rebuildLayout();
+}
+
+void TitleBar::setTitle(const QString &title)
+{
+    m_titleLabel->setText(title);
+}
+
+void TitleBar::setMaximized(bool maximized)
+{
+    m_isMaximized = maximized;
+    m_maximizeBtn->setText(maximized ? "❐" : "□");
+    m_maximizeBtn->setToolTip(maximized ? QString::fromUtf8("Восстановить")
+                                        : QString::fromUtf8("Развернуть"));
+}
+
+void TitleBar::rebuildLayout()
+{
+    QLayoutItem *item;
+    while ((item = m_layout->takeAt(0)) != nullptr) {
+        // не удаляем виджеты
+    }
+
+    if (m_position == Left) {
+        m_layout->addWidget(m_closeBtn);
+        m_layout->addWidget(m_minimizeBtn);
+        m_layout->addWidget(m_maximizeBtn);
+        m_layout->addStretch();
+        m_layout->addWidget(m_titleLabel);
+        m_layout->addStretch();
+    } else {
+        m_layout->addStretch();
+        m_layout->addWidget(m_titleLabel);
+        m_layout->addStretch();
+        m_layout->addWidget(m_minimizeBtn);
+        m_layout->addWidget(m_maximizeBtn);
+        m_layout->addWidget(m_closeBtn);
+    }
+
+    m_minimizeBtn->setStyleSheet(buttonStyle());
+    m_maximizeBtn->setStyleSheet(buttonStyle());
+    m_closeBtn->setStyleSheet(buttonStyle(true));
+}
+
+QString TitleBar::buttonStyle(bool isClose) const
+{
+    // Используем системную палитру через palette()
+    if (isClose) {
+        return QString::fromUtf8(
+            "QPushButton {"
+            "  border: none;"
+            "  background: transparent;"
+            "  color: palette(window-text);"
+            "  font-size: 16px;"
+            "  border-radius: 4px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: #e81123;"
+            "  color: white;"
+            "}"
+            "QPushButton:pressed {"
+            "  background: #c50f1f;"
+            "  color: white;"
+            "}"
+        );
+    }
+
+    return QString::fromUtf8(
+        "QPushButton {"
+        "  border: none;"
+        "  background: transparent;"
+        "  color: palette(window-text);"
+        "  font-size: 14px;"
+        "  border-radius: 4px;"
+        "}"
+        "QPushButton:hover {"
+        "  background: palette(mid);"
+        "}"
+        "QPushButton:pressed {"
+        "  background: palette(dark);"
+        "}"
+    );
+}
+
+void TitleBar::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton) {
+        m_dragPos = event->globalPosition().toPoint() - window()->frameGeometry().topLeft();
+        event->accept();
+    }
+}
+
+void TitleBar::mouseMoveEvent(QMouseEvent *event)
+{
+    if (event->buttons() & Qt::LeftButton && !m_isMaximized) {
+        window()->move(event->globalPosition().toPoint() - m_dragPos);
+        event->accept();
+    }
+}
+
+void TitleBar::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton)
+        emit maximizeClicked();
+}
+
+void TitleBar::paintEvent(QPaintEvent *)
+{
+    QStyleOption opt;
+    opt.initFrom(this);
+    QPainter p(this);
+    // Рисуем фон как у системного окна
+    style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
+}
+
+void TitleBar::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) {
+        updateSystemStyle();
+    }
+    QWidget::changeEvent(event);
+}
+
