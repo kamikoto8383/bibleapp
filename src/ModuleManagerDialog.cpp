@@ -128,12 +128,15 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
 
     auto *btnLayout = new QHBoxLayout;
 
-    m_convertBtn = new QPushButton(tr("Конвертировать модуль BibleQuote…"), this);
+    m_convertBtn = new QPushButton(tr("m.biblequote"), this);
+    m_myBibleBtn = new QPushButton(tr("m.mybible"), this);
+    m_myBibleBtn->setToolTip(tr("Импорт любого модуля MyBible (.SQLite3): Библия, словарь, симфония, комментарий"));
     m_openBtn = new QPushButton(tr("Открыть выбранный"), this);
     m_deleteBtn = new QPushButton(tr("Удалить модуль"), this);
     auto *closeBtn = new QPushButton(tr("Закрыть"), this);
 
     btnLayout->addWidget(m_convertBtn);
+    btnLayout->addWidget(m_myBibleBtn);
     btnLayout->addStretch();
     btnLayout->addWidget(m_openBtn);
     btnLayout->addWidget(m_deleteBtn);
@@ -142,6 +145,7 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
     layout->addLayout(btnLayout);
 
     connect(m_convertBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onConvert);
+    connect(m_myBibleBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onConvertMyBible);
     connect(m_openBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onOpenSelected);
     connect(m_deleteBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onDeleteSelected);
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
@@ -468,3 +472,50 @@ void ModuleManagerDialog::onDeleteSelected()
             tr("Не удалось удалить модуль. Возможно, это встроенный модуль без права на удаление."));
     }
 }
+
+void ModuleManagerDialog::onConvertMyBible()
+{
+    const QString file = QFileDialog::getOpenFileName(
+        this,
+        tr("Выберите модуль MyBible"),
+        QString(),
+        tr("MyBible SQLite (*.SQLite3 *.sqlite3 *.sqlite *.db);;Все файлы (*)")
+    );
+    if (file.isEmpty())
+        return;
+
+    QProgressDialog prog(tr("Импорт MyBible…"), tr("Отмена"), 0, 100, this);
+    prog.setWindowModality(Qt::WindowModal);
+    prog.setMinimumDuration(0);
+    prog.setValue(5);
+
+    connect(&m_converter, &Converter::progress, this, [&](int current, int total, const QString &status) {
+        if (total > 0)
+            prog.setValue(10 + (current * 80) / total);
+        prog.setLabelText(status);
+        QCoreApplication::processEvents();
+    });
+
+    const QString outDir = m_manager->modulesPath();
+    auto result = m_converter.convertMyBible(file, outDir);
+
+    prog.setValue(100);
+    if (!result.success) {
+        QMessageBox::warning(this, tr("m.mybible"),
+                             result.message.isEmpty() ? tr("Импорт не удался.") : result.message);
+        return;
+    }
+
+    QMessageBox::information(
+        this, tr("m.mybible"),
+        tr("Модуль «%1» установлен.\nКниг (букв): %2\nСтатей: %3")
+            .arg(result.detectedName)
+            .arg(result.booksConverted)
+            .arg(result.versesConverted));
+
+    if (!result.detectedName.isEmpty())
+        m_currentModuleName = result.detectedName;
+    refreshList();
+}
+
+

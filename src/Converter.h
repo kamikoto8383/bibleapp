@@ -33,6 +33,9 @@ public:
     // Конвертация + обязательный пост-аудит качества
     ConversionResult convert(const QString &bibleQuoteModulePath, const QString &outputDir);
 
+    /** Импорт модуля MyBible (.SQLite3): словарь / симфония / commentary */
+    ConversionResult convertMyBible(const QString &sqliteFilePath, const QString &outputDir);
+
 signals:
     void progress(int current, int total, const QString &status);
 

@@ -24,6 +24,7 @@
 #include <QList>
 #include <QMenuBar>
 #include <QMenu>
+#include <QKeySequence>
 #include <QTextBrowser>
 #include <QActionGroup>
 
@@ -168,6 +169,55 @@ void MainWindow::setupUi()
     }
     if (m_windowActions[1])
         m_windowActions[1]->setChecked(true); // по умолчанию 2
+
+    // Меню «Вид»
+    auto *menuView = menuBar()->addMenu(QString::fromUtf8("Вид"));
+    auto activeView = [this]() -> BibleView * {
+        BibleView *target = m_views.isEmpty() ? nullptr : m_views[0];
+        for (BibleView *v : m_views) {
+            if (v && v->isVisible() && v->isActiveHighlight()) {
+                target = v;
+                break;
+            }
+        }
+        if ((!target || !target->isVisible()) && !m_views.isEmpty()) {
+            for (BibleView *v : m_views) {
+                if (v && v->isVisible()) {
+                    target = v;
+                    break;
+                }
+            }
+        }
+        return target;
+    };
+    auto *actFontPlus = menuView->addAction(QString::fromUtf8("Увеличить шрифт"));
+    actFontPlus->setShortcut(QKeySequence::ZoomIn);
+    connect(actFontPlus, &QAction::triggered, this, [activeView]() {
+        if (BibleView *v = activeView())
+            v->setFontSize(v->fontSize() + 1);
+    });
+    auto *actFontMinus = menuView->addAction(QString::fromUtf8("Уменьшить шрифт"));
+    actFontMinus->setShortcut(QKeySequence::ZoomOut);
+    connect(actFontMinus, &QAction::triggered, this, [activeView]() {
+        if (BibleView *v = activeView())
+            v->setFontSize(v->fontSize() - 1);
+    });
+    menuView->addSeparator();
+    auto *actNoto = menuView->addAction(QString::fromUtf8("Шрифт: Noto Serif"));
+    connect(actNoto, &QAction::triggered, this, [activeView]() {
+        if (BibleView *v = activeView())
+            v->setFontFamily(QStringLiteral("Noto Serif"));
+    });
+    auto *actGent = menuView->addAction(QString::fromUtf8("Шрифт: Gentium Plus"));
+    connect(actGent, &QAction::triggered, this, [activeView]() {
+        if (BibleView *v = activeView())
+            v->setFontFamily(QStringLiteral("Gentium Plus"));
+    });
+    auto *actHeb = menuView->addAction(QString::fromUtf8("Шрифт: Noto Serif Hebrew"));
+    connect(actHeb, &QAction::triggered, this, [activeView]() {
+        if (BibleView *v = activeView())
+            v->setFontFamily(QStringLiteral("Noto Serif Hebrew"));
+    });
 
     // Меню «Справка»
     auto *menuHelp = menuBar()->addMenu(QString::fromUtf8("Справка"));

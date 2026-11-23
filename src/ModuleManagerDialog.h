@@ -23,6 +23,7 @@ signals:
 private slots:
     void refreshList();
     void onConvert();
+    void onConvertMyBible();
     void onOpenSelected();
     void onSelectionChanged();
     void onDeleteSelected();
@@ -35,6 +36,7 @@ private:
     QListWidget *m_list = nullptr;
     QLabel *m_infoLabel = nullptr;
     QPushButton *m_convertBtn = nullptr;
+    QPushButton *m_myBibleBtn = nullptr;
     QPushButton *m_openBtn = nullptr;
     QPushButton *m_deleteBtn = nullptr;
 };

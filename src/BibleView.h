@@ -79,6 +79,8 @@ private slots:
     void onBookmarkClicked();
     void onRemoveBookmark();
     void onClearBookmarks();
+    void onHistoryClicked();
+    void onClearHistory();
     void onAnchorClicked(const QUrl &url);
 
 private:
@@ -91,6 +93,10 @@ private:
     void saveBookmarks();
     void refreshBookmarkList();
     QString bookmarkKey() const;
+    void addHistoryEntry(int book, int chapter, int verse);
+    void loadHistory();
+    void saveHistory();
+    void refreshHistoryList();
 
     Module *m_module = nullptr;
     int m_fontSize = 13;
@@ -119,6 +125,7 @@ private:
     QListWidget *m_searchResults = nullptr;
     QListWidget *m_parallelList = nullptr;
     QListWidget *m_bookmarkList = nullptr;
+    QListWidget *m_historyList = nullptr;
     QLabel *m_fontLabel = nullptr;
     QFontComboBox *m_fontCombo = nullptr;
     QTabWidget *m_sideTabs = nullptr;

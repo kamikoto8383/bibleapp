@@ -364,7 +364,7 @@ BibleView::BibleView(QWidget *parent)
 
     // Белая непрозрачная подсказка поверх поля (пока пусто)
     {
-        auto *hint = new QLabel(QString::fromUtf8("Поиск по всем книгам модуля…"), m_searchEdit);
+        auto *hint = new QLabel(QString::fromUtf8("Поиск"), m_searchEdit);
         hint->setObjectName(QStringLiteral("searchHint"));
         hint->setStyleSheet(QStringLiteral(
             "QLabel#searchHint {"
@@ -382,18 +382,34 @@ BibleView::BibleView(QWidget *parent)
             hint->setVisible(edit->text().isEmpty());
         };
         m_searchEdit->installEventFilter(this);
-        // храним подсказку как child — обновляем при вводе и ресайзе
         QObject::connect(m_searchEdit, &QLineEdit::textChanged, this, [hint](const QString &t) {
             if (hint) hint->setVisible(t.isEmpty());
         });
-        // первичное положение после показа
         QTimer::singleShot(0, m_searchEdit, [m_searchEdit = m_searchEdit, hint, reposition]() {
             reposition(m_searchEdit);
         });
-        // resize через eventFilter BibleView — пометим objectName поля
         m_searchEdit->setProperty("hasSearchHint", true);
         hint->raise();
     }
+
+    // Маленькая кнопка очистки поля поиска
+    auto *clearFieldBtn = new QPushButton(QString::fromUtf8("✕"), this);
+    clearFieldBtn->setFixedSize(28, 28);
+    clearFieldBtn->setToolTip(QString::fromUtf8("Очистить поле поиска"));
+    clearFieldBtn->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  font-size: 12px;"
+        "  padding: 0;"
+        "  min-width: 28px;"
+        "}"
+    ));
+    searchLayout->addWidget(clearFieldBtn);
+    connect(clearFieldBtn, &QPushButton::clicked, this, [this]() {
+        if (m_searchEdit)
+            m_searchEdit->clear();
+        onClearSearchResults();
+    });
+
     auto *searchBtn = new QPushButton(QString::fromUtf8("Найти"), this);
     searchLayout->addWidget(searchBtn);
     connect(searchBtn, &QPushButton::clicked, this, &BibleView::onSearch);
@@ -498,7 +514,7 @@ BibleView::BibleView(QWidget *parent)
         QTimer::singleShot(250, this, [this, b, c, v]() { revealParallelVerse(b, c, v); });
     });
 
-    m_sideTabs->addTab(sideTools, QString::fromUtf8("Сервис"));
+    m_sideTabs->addTab(sideTools, QString::fromUtf8("Закладки"));
 
     // --- Вкладка: Шрифт ---
     auto *fontPage = new QWidget(m_sideTabs);
@@ -550,7 +566,32 @@ BibleView::BibleView(QWidget *parent)
     connect(fontPlus2, &QPushButton::clicked, this, &BibleView::onFontBigger);
 
     fontLay->addStretch(1);
+
     m_sideTabs->addTab(fontPage, QString::fromUtf8("Шрифт"));
+
+    // --- Вкладка: История ---
+    auto *histPage = new QWidget(m_sideTabs);
+    auto *histLay = new QVBoxLayout(histPage);
+    histLay->setContentsMargins(4, 4, 4, 4);
+    histLay->addWidget(new QLabel(QString::fromUtf8(
+        "Места чтения (модуль, книга, глава:стих):"), histPage));
+    m_historyList = new QListWidget(histPage);
+    histLay->addWidget(m_historyList, 1);
+    connect(m_historyList, &QListWidget::itemDoubleClicked, this, &BibleView::onHistoryClicked);
+    connect(m_historyList, &QListWidget::itemClicked, this, &BibleView::onHistoryClicked);
+
+    auto *histBtnRow = new QHBoxLayout;
+    auto *gotoHist = new QPushButton(QString::fromUtf8("Перейти"), histPage);
+    auto *clearHist = new QPushButton(QString::fromUtf8("Очистить"), histPage);
+    clearHist->setToolTip(QString::fromUtf8("Очистить всю историю чтения"));
+    histBtnRow->addWidget(gotoHist);
+    histBtnRow->addWidget(clearHist);
+    histLay->addLayout(histBtnRow);
+    connect(gotoHist, &QPushButton::clicked, this, &BibleView::onHistoryClicked);
+    connect(clearHist, &QPushButton::clicked, this, &BibleView::onClearHistory);
+
+    m_sideTabs->addTab(histPage, QString::fromUtf8("История"));
+
 
     sideOuter->addWidget(m_sideTabs);
     connect(m_fontCombo, &QFontComboBox::currentFontChanged, this, [this](const QFont &f) {
@@ -581,6 +622,7 @@ BibleView::BibleView(QWidget *parent)
             });
 
     applyTextStyle();
+    loadHistory();
 }
 
 
@@ -1262,6 +1304,7 @@ void BibleView::goTo(int book, int chapter, int verse)
         });
     }
     m_blockSettingsSave = prevBlock;
+    addHistoryEntry(book, chapter, verse > 0 ? verse : 1);
     savePanelState(this);
     setFocus();
 }
@@ -1276,6 +1319,8 @@ void BibleView::onBookChanged(int index)
     m_currentVerse = 1;
     loadChapter();
     refillVerseCombo(1);
+    if (!m_blockSettingsSave)
+        addHistoryEntry(m_currentBook, m_currentChapter, 1);
     savePanelState(this);
 }
 
@@ -1286,6 +1331,8 @@ void BibleView::onChapterChanged(int chapter)
     m_currentChapter = chapter;
     m_currentVerse = 1;
     loadChapter();
+    if (!m_blockSettingsSave)
+        addHistoryEntry(m_currentBook, m_currentChapter, 1);
     refillVerseCombo(1);
     savePanelState(this);
 }
@@ -1643,4 +1690,107 @@ void BibleView::showWordInfo(const QString &html)
     }
     m_wordWindow->setHtml(html);
 }
+
+void BibleView::addHistoryEntry(int book, int chapter, int verse)
+{
+    if (!m_module || book <= 0 || chapter < 0)
+        return;
+    const QString modName = m_module->name();
+    QString bookName = modName;
+    for (const auto &b : m_module->books()) {
+        if (b.id == book) {
+            bookName = b.fullName;
+            break;
+        }
+    }
+    // формат: module|bookId|chapter|verse|bookName
+    const QString entry = QStringLiteral("%1|%2|%3|%4|%5")
+                              .arg(modName)
+                              .arg(book)
+                              .arg(chapter)
+                              .arg(verse > 0 ? verse : 1)
+                              .arg(bookName);
+
+    QSettings &s = appSettings();
+    QStringList list = s.value(QStringLiteral("history/entries")).toStringList();
+    // убрать дубликат того же места
+    list.removeAll(entry);
+    list.prepend(entry);
+    while (list.size() > 200)
+        list.removeLast();
+    s.setValue(QStringLiteral("history/entries"), list);
+    s.sync();
+    refreshHistoryList();
+}
+
+void BibleView::loadHistory()
+{
+    refreshHistoryList();
+}
+
+void BibleView::saveHistory()
+{
+    // уже пишется в addHistoryEntry / onClearHistory
+}
+
+void BibleView::refreshHistoryList()
+{
+    if (!m_historyList)
+        return;
+    m_historyList->clear();
+    QSettings &s = appSettings();
+    const QStringList list = s.value(QStringLiteral("history/entries")).toStringList();
+    for (const QString &raw : list) {
+        const QStringList p = raw.split(QLatin1Char('|'));
+        if (p.size() < 5)
+            continue;
+        const QString mod = p[0];
+        const int book = p[1].toInt();
+        const int chapter = p[2].toInt();
+        const int verse = p[3].toInt();
+        const QString bookName = p[4];
+        QString label = QString::fromUtf8("%1 — %2 %3:%4")
+                            .arg(mod, bookName)
+                            .arg(chapter)
+                            .arg(verse);
+        auto *item = new QListWidgetItem(label, m_historyList);
+        item->setData(Qt::UserRole, mod);
+        item->setData(Qt::UserRole + 1, book);
+        item->setData(Qt::UserRole + 2, chapter);
+        item->setData(Qt::UserRole + 3, verse);
+    }
+}
+
+void BibleView::onHistoryClicked()
+{
+    if (!m_historyList)
+        return;
+    auto *item = m_historyList->currentItem();
+    if (!item || !item->data(Qt::UserRole + 1).isValid())
+        return;
+    const QString modName = item->data(Qt::UserRole).toString();
+    const int book = item->data(Qt::UserRole + 1).toInt();
+    const int chapter = item->data(Qt::UserRole + 2).toInt();
+    const int verse = item->data(Qt::UserRole + 3).toInt();
+
+    // если другой модуль — ищем среди загруженных через менеджер нельзя отсюда;
+    // переходим в текущем модуле, если имя совпадает; иначе всё равно goTo по книге
+    if (m_module && m_module->name() == modName) {
+        goTo(book, chapter, verse);
+        return;
+    }
+    // попробовать найти модуль на диске через путь modules
+    // просто goTo — если книги есть в текущем модуле
+    goTo(book, chapter, verse);
+}
+
+void BibleView::onClearHistory()
+{
+    QSettings &s = appSettings();
+    s.remove(QStringLiteral("history/entries"));
+    s.sync();
+    if (m_historyList)
+        m_historyList->clear();
+}
+
 

@@ -1,4 +1,7 @@
 #include "Converter.h"
+#include <QMap>
+#include <QHash>
+#include <QVector>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -12,6 +15,7 @@
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSqlRecord>
 #include <QStringDecoder>
 #include <QUuid>
 #include <QUrl>
@@ -2399,4 +2403,522 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
         result.success = false;
 
     return result;
+}
+
+ConversionResult Converter::convertMyBible(const QString &sqliteFilePath, const QString &outputDir)
+{
+    ConversionResult r;
+    QFileInfo fi(sqliteFilePath);
+    if (!fi.exists() || !fi.isFile()) {
+        r.message = QString::fromUtf8("Файл не найден.");
+        return r;
+    }
+
+    const QString srcConn = QStringLiteral("mybible_src_") + QUuid::createUuid().toString(QUuid::Id128);
+    QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), srcConn);
+    db.setDatabaseName(sqliteFilePath);
+    db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+    if (!db.open()) {
+        r.message = QString::fromUtf8("Не удалось открыть SQLite: %1").arg(db.lastError().text());
+        QSqlDatabase::removeDatabase(srcConn);
+        return r;
+    }
+
+    const QStringList tables = db.tables();
+    auto hasTable = [&](const QString &n) {
+        return tables.contains(n, Qt::CaseInsensitive);
+    };
+
+    // ---- info ----
+    QHash<QString, QString> info;
+    if (hasTable(QStringLiteral("info"))) {
+        QSqlQuery q(db);
+        if (q.exec(QStringLiteral("SELECT name, value FROM info"))) {
+            while (q.next())
+                info.insert(q.value(0).toString().toLower(), q.value(1).toString());
+        }
+    }
+
+    QString modName = info.value(QStringLiteral("description"));
+    if (modName.isEmpty())
+        modName = info.value(QStringLiteral("module_name"));
+    if (modName.isEmpty())
+        modName = info.value(QStringLiteral("name"));
+    if (modName.isEmpty())
+        modName = fi.completeBaseName();
+
+    QString lang = info.value(QStringLiteral("language"));
+    if (lang.isEmpty())
+        lang = QStringLiteral("ru");
+
+    QString detailed = info.value(QStringLiteral("detailed_info"));
+    if (detailed.isEmpty())
+        detailed = modName;
+
+    QString infoType = info.value(QStringLiteral("type")).toLower().trimmed();
+
+    // Определяем тип по таблицам (надёжнее, чем только info.type)
+    enum Kind { Bible, Dictionary, Commentary, Unknown };
+    Kind kind = Unknown;
+    if (hasTable(QStringLiteral("verses")) && (hasTable(QStringLiteral("books")) || hasTable(QStringLiteral("book"))))
+        kind = Bible;
+    else if (hasTable(QStringLiteral("dictionary")))
+        kind = Dictionary;
+    else if (hasTable(QStringLiteral("commentaries")) || hasTable(QStringLiteral("commentary")))
+        kind = Commentary;
+    else if (infoType.contains(QStringLiteral("bible")) || infoType.contains(QStringLiteral("text")))
+        kind = Bible;
+    else if (infoType.contains(QStringLiteral("dict")) || infoType.contains(QStringLiteral("concord")))
+        kind = Dictionary;
+    else if (infoType.contains(QStringLiteral("comment")))
+        kind = Commentary;
+
+    if (kind == Unknown) {
+        r.message = QString::fromUtf8(
+            "Неизвестный формат MyBible.\nТаблицы: %1\ninfo.type: %2")
+            .arg(tables.join(QStringLiteral(", ")), infoType.isEmpty() ? QString::fromUtf8("(нет)") : infoType);
+        db.close();
+        QSqlDatabase::removeDatabase(srcConn);
+        return r;
+    }
+
+    // ---- выходная папка ----
+    QString folder = modName;
+    folder.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]+")), QStringLiteral("_"));
+    folder = folder.trimmed();
+    if (folder.isEmpty())
+        folder = QStringLiteral("mybible_module");
+    QString outPath = outputDir + QLatin1Char('/') + folder;
+    if (QDir(outPath).exists())
+        outPath = outputDir + QLatin1Char('/') + folder + QStringLiteral("_mb");
+    QDir().mkpath(outPath);
+
+    const QString outDbPath = outPath + QStringLiteral("/data.sqlite");
+    QFile::remove(outDbPath);
+    const QString outConn = QStringLiteral("mybible_out_") + QUuid::createUuid().toString(QUuid::Id128);
+    QSqlDatabase out = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), outConn);
+    out.setDatabaseName(outDbPath);
+    if (!out.open()) {
+        r.message = QString::fromUtf8("Не удалось создать модуль: %1").arg(out.lastError().text());
+        db.close();
+        QSqlDatabase::removeDatabase(srcConn);
+        QSqlDatabase::removeDatabase(outConn);
+        return r;
+    }
+
+    {
+        QSqlQuery oq(out);
+        oq.exec(QStringLiteral(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, short_name TEXT, full_name TEXT, chapters INTEGER)"));
+        oq.exec(QStringLiteral(
+            "CREATE TABLE verses (book INTEGER, chapter INTEGER, verse INTEGER, text TEXT, "
+            "PRIMARY KEY(book, chapter, verse))"));
+        oq.exec(QStringLiteral("CREATE INDEX idx_v_book ON verses(book, chapter)"));
+    }
+
+    int booksConverted = 0;
+    int versesConverted = 0;
+    QString outType = QStringLiteral("bible");
+
+    // ========== BIBLE ==========
+    if (kind == Bible) {
+        outType = QStringLiteral("bible");
+        // books: book_number, long_name / short_name (варианты схемы)
+        struct BBook { int num; QString full; QString shortN; };
+        QVector<BBook> bbooks;
+
+        {
+            QSqlQuery q(db);
+            QString sql;
+            if (hasTable(QStringLiteral("books"))) {
+                // типичные колонки MyBible
+                sql = QStringLiteral("SELECT book_number, long_name, short_name FROM books ORDER BY book_number");
+                if (!q.exec(sql)) {
+                    q = QSqlQuery(db);
+                    sql = QStringLiteral("SELECT book_number, book_color, long_name, short_name FROM books ORDER BY book_number");
+                    if (!q.exec(QStringLiteral("SELECT * FROM books ORDER BY book_number"))) {
+                        r.message = QString::fromUtf8("Не удалось прочитать books: %1").arg(q.lastError().text());
+                        out.close(); db.close();
+                        QSqlDatabase::removeDatabase(outConn);
+                        QSqlDatabase::removeDatabase(srcConn);
+                        return r;
+                    }
+                    // разбор по именам колонок
+                    QSqlRecord rec = q.record();
+                    int iNum = rec.indexOf(QStringLiteral("book_number"));
+                    if (iNum < 0) iNum = 0;
+                    int iLong = rec.indexOf(QStringLiteral("long_name"));
+                    int iShort = rec.indexOf(QStringLiteral("short_name"));
+                    if (iLong < 0) iLong = rec.indexOf(QStringLiteral("name"));
+                    while (q.next()) {
+                        BBook b;
+                        b.num = q.value(iNum).toInt();
+                        b.full = iLong >= 0 ? q.value(iLong).toString() : QString::number(b.num);
+                        b.shortN = iShort >= 0 ? q.value(iShort).toString() : b.full;
+                        if (b.full.isEmpty()) b.full = QString::number(b.num);
+                        if (b.shortN.isEmpty()) b.shortN = b.full;
+                        if (b.num > 0)
+                            bbooks.append(b);
+                    }
+                } else {
+                    while (q.next()) {
+                        BBook b;
+                        b.num = q.value(0).toInt();
+                        b.full = q.value(1).toString();
+                        b.shortN = q.value(2).toString();
+                        if (b.full.isEmpty()) b.full = QString::number(b.num);
+                        if (b.shortN.isEmpty()) b.shortN = b.full;
+                        if (b.num > 0)
+                            bbooks.append(b);
+                    }
+                }
+            }
+        }
+
+        // Если books пуст — собрать номера из verses
+        if (bbooks.isEmpty()) {
+            QSqlQuery q(db);
+            if (q.exec(QStringLiteral("SELECT DISTINCT book_number FROM verses ORDER BY book_number"))) {
+                while (q.next()) {
+                    BBook b;
+                    b.num = q.value(0).toInt();
+                    b.full = QString::fromUtf8("Книга %1").arg(b.num);
+                    b.shortN = QString::number(b.num);
+                    bbooks.append(b);
+                }
+            }
+        }
+
+        if (bbooks.isEmpty()) {
+            r.message = QString::fromUtf8("В модуле нет книг (books/verses).");
+            out.close(); db.close();
+            QSqlDatabase::removeDatabase(outConn);
+            QSqlDatabase::removeDatabase(srcConn);
+            return r;
+        }
+
+        // Сохраняем book_number MyBible как id — для ссылок B:N
+        out.transaction();
+        int bi = 0;
+        for (const BBook &b : bbooks) {
+            ++bi;
+            // chapters count later
+            QSqlQuery oq(out);
+            oq.prepare(QStringLiteral(
+                "INSERT INTO books (id, short_name, full_name, chapters) VALUES (?, ?, ?, 0)"));
+            oq.addBindValue(b.num);
+            oq.addBindValue(b.shortN);
+            oq.addBindValue(b.full);
+            oq.exec();
+            emit progress(bi, bbooks.size(), QString::fromUtf8("Книга: %1").arg(b.full));
+        }
+
+        // verses
+        {
+            QSqlQuery q(db);
+            // варианты: book_number, chapter, verse, text
+            if (!q.exec(QStringLiteral(
+                    "SELECT book_number, chapter, verse, text FROM verses "
+                    "ORDER BY book_number, chapter, verse"))) {
+                r.message = QString::fromUtf8("Не удалось прочитать verses: %1").arg(q.lastError().text());
+                out.rollback();
+                out.close(); db.close();
+                QSqlDatabase::removeDatabase(outConn);
+                QSqlDatabase::removeDatabase(srcConn);
+                return r;
+            }
+            QSqlQuery ins(out);
+            ins.prepare(QStringLiteral(
+                "INSERT OR REPLACE INTO verses (book, chapter, verse, text) VALUES (?, ?, ?, ?)"));
+            int n = 0;
+            while (q.next()) {
+                ins.addBindValue(q.value(0).toInt());
+                ins.addBindValue(q.value(1).toInt());
+                ins.addBindValue(q.value(2).toInt());
+                ins.addBindValue(q.value(3).toString());
+                ins.exec();
+                ins.finish();
+                ++n;
+                if (n % 2000 == 0) {
+                    emit progress(n, n + 1, QString::fromUtf8("Стихов: %1…").arg(n));
+                }
+            }
+            versesConverted = n;
+        }
+
+        // обновить chapters
+        for (const BBook &b : bbooks) {
+            QSqlQuery q(out);
+            q.prepare(QStringLiteral("SELECT COUNT(DISTINCT chapter) FROM verses WHERE book = ?"));
+            q.addBindValue(b.num);
+            int ch = 0;
+            if (q.exec() && q.next())
+                ch = q.value(0).toInt();
+            QSqlQuery u(out);
+            u.prepare(QStringLiteral("UPDATE books SET chapters = ? WHERE id = ?"));
+            u.addBindValue(ch);
+            u.addBindValue(b.num);
+            u.exec();
+        }
+        out.commit();
+        booksConverted = bbooks.size();
+    }
+
+    // ========== DICTIONARY / CONCORDANCE ==========
+    else if (kind == Dictionary) {
+        outType = QStringLiteral("dictionary");
+        struct Entry { QString topic; QString def; };
+        QVector<Entry> entries;
+        {
+            QSqlQuery q(db);
+            if (!q.exec(QStringLiteral("SELECT topic, definition FROM dictionary ORDER BY topic"))) {
+                r.message = QString::fromUtf8("Ошибка dictionary: %1").arg(q.lastError().text());
+                out.close(); db.close();
+                QSqlDatabase::removeDatabase(outConn);
+                QSqlDatabase::removeDatabase(srcConn);
+                return r;
+            }
+            while (q.next()) {
+                Entry e;
+                e.topic = q.value(0).toString().trimmed();
+                e.def = q.value(1).toString();
+                if (!e.topic.isEmpty())
+                    entries.append(e);
+            }
+        }
+        if (entries.isEmpty()) {
+            r.message = QString::fromUtf8("dictionary пуста.");
+            out.close(); db.close();
+            QSqlDatabase::removeDatabase(outConn);
+            QSqlDatabase::removeDatabase(srcConn);
+            return r;
+        }
+
+        QMap<QString, QVector<int>> groups;
+        for (int i = 0; i < entries.size(); ++i) {
+            QString letter = entries[i].topic.left(1).toUpper();
+            if (letter.isEmpty())
+                letter = QStringLiteral("#");
+            else if (letter.at(0).isDigit())
+                letter = QStringLiteral("0-9");
+            groups[letter].append(i);
+        }
+
+        out.transaction();
+        int bookId = 0;
+        for (auto it = groups.begin(); it != groups.end(); ++it) {
+            ++bookId;
+            const QString letter = it.key();
+            QSqlQuery oq(out);
+            oq.prepare(QStringLiteral(
+                "INSERT INTO books (id, short_name, full_name, chapters) VALUES (?, ?, ?, 1)"));
+            oq.addBindValue(bookId);
+            oq.addBindValue(letter);
+            oq.addBindValue(letter);
+            oq.exec();
+
+            QSqlQuery ins(out);
+            ins.prepare(QStringLiteral(
+                "INSERT INTO verses (book, chapter, verse, text) VALUES (?, 1, ?, ?)"));
+            int verse = 0;
+            for (int idx : it.value()) {
+                ++verse;
+                const Entry &e = entries[idx];
+                const QString html = QStringLiteral("<b style='font-size:1.15em'>%1</b><br/>%2")
+                                         .arg(e.topic.toHtmlEscaped(), e.def);
+                ins.addBindValue(bookId);
+                ins.addBindValue(verse);
+                ins.addBindValue(html);
+                ins.exec();
+                ins.finish();
+                ++versesConverted;
+            }
+            emit progress(bookId, groups.size(),
+                          QString::fromUtf8("Буква %1 — %2").arg(letter).arg(it.value().size()));
+        }
+        out.commit();
+        booksConverted = groups.size();
+    }
+
+    // ========== COMMENTARY ==========
+    else if (kind == Commentary) {
+        outType = QStringLiteral("commentary");
+        const QString ctable = hasTable(QStringLiteral("commentaries"))
+                                   ? QStringLiteral("commentaries")
+                                   : QStringLiteral("commentary");
+
+        // Собираем книги из комментариев
+        QMap<int, QString> bookNames;
+        {
+            QSqlQuery q(db);
+            if (hasTable(QStringLiteral("books"))) {
+                if (q.exec(QStringLiteral("SELECT book_number, long_name, short_name FROM books ORDER BY book_number"))) {
+                    while (q.next()) {
+                        QString n = q.value(1).toString();
+                        if (n.isEmpty()) n = q.value(2).toString();
+                        bookNames.insert(q.value(0).toInt(), n);
+                    }
+                }
+            }
+        }
+
+        QSqlQuery q(db);
+        // типичная схема MyBible commentaries
+        QString sql = QStringLiteral(
+            "SELECT book_number, chapter_number_from, verse_number_from, "
+            "chapter_number_to, verse_number_to, data FROM %1 "
+            "ORDER BY book_number, chapter_number_from, verse_number_from").arg(ctable);
+        if (!q.exec(sql)) {
+            // упрощённый вариант
+            sql = QStringLiteral("SELECT * FROM %1").arg(ctable);
+            if (!q.exec(sql)) {
+                r.message = QString::fromUtf8("Не удалось прочитать %1: %2")
+                                .arg(ctable, q.lastError().text());
+                out.close(); db.close();
+                QSqlDatabase::removeDatabase(outConn);
+                QSqlDatabase::removeDatabase(srcConn);
+                return r;
+            }
+        }
+
+        QSqlRecord rec = q.record();
+        auto col = [&](const char *name) { return rec.indexOf(QLatin1String(name)); };
+        int iBook = col("book_number");
+        int iChF = col("chapter_number_from");
+        int iVF = col("verse_number_from");
+        int iChT = col("chapter_number_to");
+        int iVT = col("verse_number_to");
+        int iData = col("data");
+        if (iData < 0) iData = col("text");
+        if (iBook < 0) iBook = 0;
+        if (iChF < 0) iChF = 1;
+        if (iVF < 0) iVF = 2;
+        if (iData < 0) iData = rec.count() - 1;
+
+        struct CRow {
+            int book, ch, vs;
+            QString text;
+        };
+        QVector<CRow> rows;
+        QSet<int> bookSet;
+        while (q.next()) {
+            CRow cr;
+            cr.book = q.value(iBook).toInt();
+            cr.ch = iChF >= 0 ? q.value(iChF).toInt() : 1;
+            cr.vs = iVF >= 0 ? q.value(iVF).toInt() : 1;
+            if (cr.ch <= 0) cr.ch = 1;
+            if (cr.vs <= 0) cr.vs = 1;
+            cr.text = q.value(iData).toString();
+            if (cr.text.trimmed().isEmpty())
+                continue;
+            // если диапазон — пометить в тексте
+            if (iChT >= 0 && iVT >= 0) {
+                const int chT = q.value(iChT).toInt();
+                const int vT = q.value(iVT).toInt();
+                if ((chT > cr.ch || (chT == cr.ch && vT > cr.vs)) && chT > 0) {
+                    cr.text = QStringLiteral("<i>%1:%2–%3:%4</i><br/>%5")
+                                  .arg(cr.ch).arg(cr.vs).arg(chT).arg(vT).arg(cr.text);
+                }
+            }
+            rows.append(cr);
+            bookSet.insert(cr.book);
+        }
+
+        if (rows.isEmpty()) {
+            r.message = QString::fromUtf8("Комментарии пусты.");
+            out.close(); db.close();
+            QSqlDatabase::removeDatabase(outConn);
+            QSqlDatabase::removeDatabase(srcConn);
+            return r;
+        }
+
+        out.transaction();
+        QList<int> sortedBooks = bookSet.values();
+        std::sort(sortedBooks.begin(), sortedBooks.end());
+        int bi = 0;
+        for (int bn : sortedBooks) {
+            ++bi;
+            QString name = bookNames.value(bn, QString::fromUtf8("Книга %1").arg(bn));
+            QSqlQuery oq(out);
+            oq.prepare(QStringLiteral(
+                "INSERT INTO books (id, short_name, full_name, chapters) VALUES (?, ?, ?, 0)"));
+            oq.addBindValue(bn);
+            oq.addBindValue(name);
+            oq.addBindValue(name);
+            oq.exec();
+            emit progress(bi, sortedBooks.size(), name);
+        }
+
+        // стихи: при конфликте PK склеиваем
+        QHash<QString, QString> merged;
+        for (const CRow &cr : rows) {
+            const QString key = QStringLiteral("%1:%2:%3").arg(cr.book).arg(cr.ch).arg(cr.vs);
+            if (merged.contains(key))
+                merged[key] += QStringLiteral("<hr/>") + cr.text;
+            else
+                merged.insert(key, cr.text);
+        }
+        QSqlQuery ins(out);
+        ins.prepare(QStringLiteral(
+            "INSERT OR REPLACE INTO verses (book, chapter, verse, text) VALUES (?, ?, ?, ?)"));
+        for (auto it = merged.begin(); it != merged.end(); ++it) {
+            const QStringList p = it.key().split(QLatin1Char(':'));
+            ins.addBindValue(p[0].toInt());
+            ins.addBindValue(p[1].toInt());
+            ins.addBindValue(p[2].toInt());
+            ins.addBindValue(it.value());
+            ins.exec();
+            ins.finish();
+            ++versesConverted;
+        }
+        for (int bn : sortedBooks) {
+            QSqlQuery q2(out);
+            q2.prepare(QStringLiteral("SELECT COUNT(DISTINCT chapter) FROM verses WHERE book = ?"));
+            q2.addBindValue(bn);
+            int ch = 0;
+            if (q2.exec() && q2.next()) ch = q2.value(0).toInt();
+            QSqlQuery u(out);
+            u.prepare(QStringLiteral("UPDATE books SET chapters = ? WHERE id = ?"));
+            u.addBindValue(ch);
+            u.addBindValue(bn);
+            u.exec();
+        }
+        out.commit();
+        booksConverted = sortedBooks.size();
+    }
+
+    // module.json
+    QJsonObject meta;
+    meta.insert(QStringLiteral("name"), modName);
+    meta.insert(QStringLiteral("description"), detailed);
+    meta.insert(QStringLiteral("type"), outType);
+    meta.insert(QStringLiteral("language"), lang);
+    meta.insert(QStringLiteral("source"), QStringLiteral("mybible"));
+    {
+        QFile mf(outPath + QStringLiteral("/module.json"));
+        if (mf.open(QIODevice::WriteOnly)) {
+            mf.write(QJsonDocument(meta).toJson(QJsonDocument::Indented));
+            mf.close();
+        }
+    }
+
+    out.close();
+    db.close();
+    QSqlDatabase::removeDatabase(outConn);
+    QSqlDatabase::removeDatabase(srcConn);
+
+    if (versesConverted <= 0 && booksConverted <= 0) {
+        r.message = QString::fromUtf8("Не удалось извлечь данные из модуля MyBible.");
+        return r;
+    }
+
+    r.success = true;
+    r.outputPath = outPath;
+    r.detectedName = modName;
+    r.detectedType = outType;
+    r.booksConverted = booksConverted;
+    r.versesConverted = versesConverted;
+    r.message = QString::fromUtf8("MyBible (%1): книг %2, записей %3.")
+                    .arg(outType).arg(booksConverted).arg(versesConverted);
+    return r;
 }
