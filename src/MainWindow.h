@@ -36,7 +36,7 @@ private slots:
     void onMaximize();
     void onClose();
     void onControlsPositionChanged(int index);
-    void openModuleManagerFor(BibleView *view);
+    void openModuleManagerFor(BibleView *view, bool managementMode = true);
     void rebindViewsFromSettings();
     void onModuleSelected(Module *module);
     void applySystemTheme();
@@ -72,6 +72,8 @@ private:
     bool m_uiRestored = false;
     bool m_syncingViews = false;
     bool m_syncingScroll = false;
+    bool m_scrollSyncEnabled = true;
+    QAction *m_scrollSyncAction = nullptr;
 };
 
 #endif

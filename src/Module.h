@@ -46,6 +46,9 @@ public:
     bool isValid() const { return m_valid; }
     /** true для библейского текста / подстрочника; false для комментариев и словарей */
     bool isBibleText() const;
+    /** словарь / симфония / конкорданс */
+    bool isDictionary() const;
+    bool isCommentary() const;
     QString path() const { return m_path; }
     QString name() const { return m_name; }
     QString description() const { return m_description; }

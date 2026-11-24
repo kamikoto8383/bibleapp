@@ -16,6 +16,7 @@
 #include <QEvent>
 #include <QMouseEvent>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
@@ -46,6 +47,9 @@ MainWindow::MainWindow(QWidget *parent)
     setMinimumSize(1000, 650);
     resize(1280, 800);
     setWindowTitle(QString::fromUtf8("Программа по изучению БИБЛИИ"));
+
+    // флаг до построения меню
+    m_scrollSyncEnabled = appSettings().value(QStringLiteral("ui/scrollSync"), true).toBool();
 
     setupUi();
     loadSettings();
@@ -124,7 +128,7 @@ void MainWindow::wireView(BibleView *view)
     if (!view)
         return;
     connect(view, &BibleView::requestLoadModule, this, [this, view]() {
-        openModuleManagerFor(view);
+        openModuleManagerFor(view, false); // «Моя библиотека» — выбор книги
     });
     connect(view, &BibleView::verseChanged, this, [this, view](int book, int chapter, int verse) {
         syncOtherView(view, book, chapter, verse);
@@ -169,6 +173,24 @@ void MainWindow::setupUi()
     }
     if (m_windowActions[1])
         m_windowActions[1]->setChecked(true); // по умолчанию 2
+
+    menuWindow->addSeparator();
+    m_scrollSyncAction = menuWindow->addAction(QString::fromUtf8("Синхронная прокрутка"));
+    m_scrollSyncAction->setCheckable(true);
+    m_scrollSyncAction->setChecked(m_scrollSyncEnabled);
+    m_scrollSyncAction->setToolTip(QString::fromUtf8(
+        "Одновременная прокрутка всех окон с библейским текстом, комментариями и словарями"));
+    m_scrollSyncAction->setStatusTip(m_scrollSyncAction->toolTip());
+    connect(m_scrollSyncAction, &QAction::toggled, this, [this](bool on) {
+        m_scrollSyncEnabled = on;
+        appSettings().setValue(QStringLiteral("ui/scrollSync"), on);
+        appSettings().sync();
+        if (m_statusLabel) {
+            m_statusLabel->setText(on
+                ? QString::fromUtf8("Синхронная прокрутка: включена")
+                : QString::fromUtf8("Синхронная прокрутка: выключена"));
+        }
+    });
 
     // Меню «Вид»
     auto *menuView = menuBar()->addMenu(QString::fromUtf8("Вид"));
@@ -476,7 +498,7 @@ bool MainWindow::isSyncableModule(Module *mod)
 
 void MainWindow::syncScrollFrom(BibleView *source, double ratio)
 {
-    if (m_syncingScroll || m_syncingViews || !source)
+    if (!m_scrollSyncEnabled || m_syncingScroll || m_syncingViews || !source)
         return;
     Module *srcMod = source->module();
     if (!isSyncableModule(srcMod))
@@ -521,7 +543,7 @@ void MainWindow::rebindViewsFromSettings()
         bind(m_views[i], panelKey(i));
 }
 
-void MainWindow::openModuleManagerFor(BibleView *view)
+void MainWindow::openModuleManagerFor(BibleView *view, bool managementMode)
 {
     if (!view)
         return;
@@ -546,7 +568,10 @@ void MainWindow::openModuleManagerFor(BibleView *view)
 
     m_pendingView = view;
     const QString currentName = (view && view->module()) ? view->module()->name() : QString();
-    ModuleManagerDialog dlg(&m_moduleManager, this, currentName);
+    const QString title = managementMode
+                              ? QString::fromUtf8("Менеджер модулей")
+                              : QString::fromUtf8("Моя библиотека");
+    ModuleManagerDialog dlg(&m_moduleManager, this, currentName, title, managementMode);
     connect(&dlg, &ModuleManagerDialog::moduleSelected, this, [this, view](Module *module) {
         if (!module || !view)
             return;
@@ -608,6 +633,12 @@ void MainWindow::loadSettings()
     if (settings.contains("window/state"))
         restoreState(settings.value("window/state").toByteArray());
 
+    m_scrollSyncEnabled = settings.value(QStringLiteral("ui/scrollSync"), true).toBool();
+    if (m_scrollSyncAction) {
+        QSignalBlocker b(m_scrollSyncAction);
+        m_scrollSyncAction->setChecked(m_scrollSyncEnabled);
+    }
+
     for (int i = 0; i < m_views.size(); ++i) {
         if (!m_views[i])
             continue;
@@ -627,6 +658,7 @@ void MainWindow::saveSettings()
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
     settings.setValue(QStringLiteral("window/state"), saveState());
     settings.setValue(QStringLiteral("ui/panelCount"), m_panelCount);
+    settings.setValue(QStringLiteral("ui/scrollSync"), m_scrollSyncEnabled);
     storeSplitterSizes();
 
     for (int i = 0; i < m_views.size(); ++i) {

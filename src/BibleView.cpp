@@ -1,4 +1,8 @@
 #include <QUrl>
+#include <QCoreApplication>
+#include <QStandardPaths>
+#include <QDir>
+#include <QHash>
 #include <QUrlQuery>
 #include <algorithm>
 #include "BibleView.h"
@@ -137,23 +141,22 @@ protected:
 
 // Плавная прокрутка колёсиком мыши для QTextBrowser
 
-/** Отдельное окно перевода греческого / Стронга — системная рамка (свернуть/развернуть/закрыть). */
+/** Отдельное окно перевода / сноски — системная рамка (свернуть/развернуть/закрыть). */
 class WordInfoWindow : public QMainWindow
 {
 public:
     explicit WordInfoWindow(QWidget *parent = nullptr)
         : QMainWindow(parent)
     {
-        setWindowTitle(QString::fromUtf8("Перевод слова"));
+        setWindowTitle(QString::fromUtf8("Справка"));
         setAttribute(Qt::WA_DeleteOnClose, false);
-        // Обычное окно ОС: тема системы, кнопки свернуть / развернуть / закрыть
         setWindowFlags(Qt::Window
                        | Qt::WindowTitleHint
                        | Qt::WindowSystemMenuHint
                        | Qt::WindowMinMaxButtonsHint
                        | Qt::WindowCloseButtonHint);
-        resize(420, 360);
-        setMinimumSize(280, 180);
+        resize(460, 400);
+        setMinimumSize(300, 200);
 
         m_browser = new QTextBrowser(this);
         m_browser->setOpenLinks(false);
@@ -161,30 +164,135 @@ public:
         m_browser->setReadOnly(true);
         setCentralWidget(m_browser);
 
-        // Как у основного текста модулей: бумажный фон, чёрный текст
         applyPaperStyle();
-        m_browser->setHtml(QString::fromUtf8(
-            "<p style='color:#000000'>Нажмите на греческое слово или номер Стронга в тексте — "
-            "здесь появится перевод.</p>"));
+        m_browser->setHtml(wrapHtml(QString::fromUtf8(
+            "<p class='hint'>Нажмите на греческое слово, номер Стронга или сноску в тексте — "
+            "здесь появится информация.</p>")));
+    }
+
+    static QString documentCss()
+    {
+        return QStringLiteral(
+            "body {"
+            "  background-color: #f7f0e0;"
+            "  color: #1a120a;"
+            "  font-family: 'Noto Serif', 'DejaVu Serif', serif;"
+            "  font-size: 14px;"
+            "  line-height: 1.55;"
+            "  margin: 0;"
+            "  padding: 12px 16px 16px 16px;"
+            "}"
+            "h1, h2, h3, h4 {"
+            "  color: #2c1810;"
+            "  font-weight: 700;"
+            "  margin: 0.4em 0 0.5em 0;"
+            "  line-height: 1.3;"
+            "}"
+            "h1 { font-size: 1.25em; }"
+            "h2 { font-size: 1.12em; }"
+            "p { margin: 0.45em 0; }"
+            "b, strong { color: #1a120a; font-weight: 700; }"
+            "i, em { color: #3a2a1a; }"
+            "a {"
+            "  color: #6b3a1a;"
+            "  text-decoration: underline;"
+            "  text-underline-offset: 2px;"
+            "}"
+            "a:hover { color: #8a4a20; }"
+            "mark, .highlight {"
+            "  background-color: #ffe28a;"
+            "  color: #1a1000;"
+            "  padding: 0 2px;"
+            "  border-radius: 2px;"
+            "}"
+            "hr {"
+            "  border: none;"
+            "  border-top: 1px solid #d4c4a8;"
+            "  margin: 10px 0;"
+            "}"
+            "ul, ol { margin: 0.4em 0 0.4em 1.2em; padding: 0; }"
+            "li { margin: 0.2em 0; }"
+            "blockquote {"
+            "  margin: 0.6em 0;"
+            "  padding: 8px 12px;"
+            "  background: #efe6d2;"
+            "  border-left: 3px solid #c4a574;"
+            "  color: #2c1810;"
+            "}"
+            "table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }"
+            "td, th {"
+            "  border: 1px solid #d4c4a8;"
+            "  padding: 4px 8px;"
+            "  vertical-align: top;"
+            "}"
+            "th { background: #efe6d2; font-weight: 700; }"
+            ".ref-title {"
+            "  font-size: 1.2em;"
+            "  font-weight: 700;"
+            "  color: #2c1810;"
+            "  margin: 0 0 10px 0;"
+            "  padding-bottom: 6px;"
+            "  border-bottom: 1px solid #d4c4a8;"
+            "}"
+            ".verse-text { line-height: 1.55; color: #1a120a; }"
+            ".hint { color: #5a4a3a; font-size: 0.95em; }"
+            ".strong-num {"
+            "  display: inline-block;"
+            "  background: #e8d4a8;"
+            "  color: #2c1810;"
+            "  font-weight: 700;"
+            "  padding: 1px 6px;"
+            "  border-radius: 3px;"
+            "  font-size: 0.9em;"
+            "}"
+        );
     }
 
     void applyPaperStyle()
     {
-        // Тот же цвет, что у окон с текстом (#f7f0e0)
         const QString css = QStringLiteral(
+            "QMainWindow { background-color: #f7f0e0; }"
             "QTextBrowser {"
             "  background-color: #f7f0e0;"
-            "  color: #000000;"
+            "  color: #1a120a;"
             "  border: none;"
-            "  padding: 10px;"
+            "  padding: 0;"
             "  selection-background-color: #e0d0a0;"
             "  selection-color: #000000;"
             "}"
-            "QMainWindow { background-color: #f7f0e0; }"
+            "QTextBrowser QScrollBar:vertical {"
+            "  background: #f0e6d0; width: 12px; margin: 0; border-radius: 6px;"
+            "}"
+            "QTextBrowser QScrollBar::handle:vertical {"
+            "  background: #c4b090; min-height: 28px; border-radius: 6px;"
+            "  border: 1px solid #a89070;"
+            "}"
+            "QTextBrowser QScrollBar::handle:vertical:hover { background: #b09a78; }"
+            "QTextBrowser QScrollBar::add-line:vertical,"
+            "QTextBrowser QScrollBar::sub-line:vertical { height: 0; background: none; }"
+            "QTextBrowser QScrollBar::add-page:vertical,"
+            "QTextBrowser QScrollBar::sub-page:vertical { background: #f0e6d0; }"
+            "QTextBrowser QScrollBar:horizontal {"
+            "  background: #f0e6d0; height: 12px; margin: 0; border-radius: 6px;"
+            "}"
+            "QTextBrowser QScrollBar::handle:horizontal {"
+            "  background: #c4b090; min-width: 28px; border-radius: 6px;"
+            "  border: 1px solid #a89070;"
+            "}"
+            "QTextBrowser QScrollBar::add-line:horizontal,"
+            "QTextBrowser QScrollBar::sub-line:horizontal { width: 0; background: none; }"
         );
         setStyleSheet(css);
         if (m_browser)
             m_browser->setStyleSheet(css);
+    }
+
+    static QString wrapHtml(const QString &html)
+    {
+        return QStringLiteral(
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>%1</style></head><body>%2</body></html>"
+        ).arg(documentCss(), html);
     }
 
     void setHtml(const QString &html)
@@ -192,11 +300,7 @@ public:
         if (!m_browser)
             return;
         applyPaperStyle();
-        // Принудительно чёрный текст поверх HTML статьи
-        const QString wrapped = QStringLiteral(
-            "<div style='color:#000000; background-color:#f7f0e0;'>%1</div>"
-        ).arg(html);
-        m_browser->setHtml(wrapped);
+        m_browser->setHtml(wrapHtml(html));
         if (!isVisible())
             show();
         raise();
@@ -704,6 +808,7 @@ void BibleView::fillVerseCombo(int book, int chapter, int selectVerse)
                                        : QString::number(v);
         m_verseCombo->addItem(label, v);
     }
+    m_verseCombo->setToolTip(QString::fromUtf8("Выбор стиха"));
 
     int ix = m_verseCombo->findData(selectVerse);
     if (ix < 0)
@@ -712,6 +817,7 @@ void BibleView::fillVerseCombo(int book, int chapter, int selectVerse)
     m_verseCombo->blockSignals(false);
     m_currentVerse = m_verseCombo->currentData().toInt();
 }
+
 
 void BibleView::onPrevChapter()
 {
@@ -1376,6 +1482,18 @@ void BibleView::loadChapter()
     }
 
     QString html = m_module->getChapterText(m_currentBook, m_currentChapter, m_lastSearchQuery);
+    // Ссылки MyBible B:книга глава:стих → кликабельный mbible:
+    {
+        static const QRegularExpression re1(
+            QStringLiteral("href\\s*=\\s*['\"]B:(\\d+)\\s+(\\d+):(\\d+)['\"]"),
+            QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression re2(
+            QStringLiteral("href\\s*=\\s*['\"]B:(\\d+):(\\d+):(\\d+)['\"]"),
+            QRegularExpression::CaseInsensitiveOption);
+        html.replace(re1, QStringLiteral("href=\"mbible:\\1/\\2/\\3\""));
+        html.replace(re2, QStringLiteral("href=\"mbible:\\1/\\2/\\3\""));
+    }
+
     if (html.isEmpty()) {
         m_textView->setHtml(QString::fromUtf8(
             "<p style='color:#666'>Нет текста для %1, глава %2.</p>")
@@ -1383,7 +1501,8 @@ void BibleView::loadChapter()
     } else {
         const QString type = m_module->type().toLower();
         const bool isDictionary = type.contains(QLatin1String("dict"))
-                                  || type.contains(QString::fromUtf8("слов"));
+                                  || type.contains(QString::fromUtf8("слов"))
+                                  || type.contains(QLatin1String("concord"));
         const QString chapterTitle = (m_currentChapter == 0)
                                          ? QString::fromUtf8("Введение")
                                          : QString::number(m_currentChapter);
@@ -1404,6 +1523,7 @@ void BibleView::loadChapter()
     emit verseChanged(m_currentBook, m_currentChapter, m_currentVerse);
 }
 
+
 void BibleView::showParallelForCurrent()
 {
     showParallelsForVerse(m_currentBook, m_currentChapter, m_currentVerse);
@@ -1423,18 +1543,31 @@ void BibleView::scrollToSearchMatch(const QString &query, int verse)
     if (!doc)
         return;
 
-    // 2) Ищем слово без учёта регистра
-    const QString needle = query.trimmed().split(QRegularExpression(QStringLiteral("[ \t]+")),
-                                                  Qt::SkipEmptyParts).value(0);
-    if (needle.isEmpty())
+    const QString phrase = query.trimmed().simplified();
+    if (phrase.isEmpty())
         return;
 
-    QTextCursor found = doc->find(needle, 0, QTextDocument::FindFlags());
-    // Qt find is case-insensitive by default for FindFlags empty? Actually default is case-insensitive on some platforms
-    // Explicit: use FindCaseSensitively inverted — no flag means case insensitive for QTextDocument::find
+    auto findNeedle = [&](const QString &needle) -> QTextCursor {
+        if (needle.isEmpty())
+            return QTextCursor();
+        QTextCursor c = doc->find(needle, 0);
+        if (c.isNull())
+            c = doc->find(needle, QTextCursor(doc));
+        return c;
+    };
+
+    // 2) Ищем целую фразу, затем отдельные слова
+    QTextCursor found = findNeedle(phrase);
     if (found.isNull()) {
-        // попробовать с начала после якоря
-        found = doc->find(needle, QTextCursor(doc));
+        // без лишних пробелов / регистр — Qt find по умолчанию case-insensitive
+        const QStringList parts = phrase.split(QRegularExpression(QStringLiteral("\\s+")),
+                                               Qt::SkipEmptyParts);
+        if (parts.size() >= 2) {
+            // пробуем первые 2–3 слова как подфразу
+            found = findNeedle(parts.mid(0, qMin(3, parts.size())).join(QLatin1Char(' ')));
+        }
+        if (found.isNull() && !parts.isEmpty())
+            found = findNeedle(parts.first());
     }
     if (found.isNull())
         return;
@@ -1458,6 +1591,7 @@ void BibleView::scrollToSearchMatch(const QString &query, int verse)
         }
     }
 }
+
 
 void BibleView::onSearch()
 {
@@ -1608,6 +1742,121 @@ void BibleView::showParallelsForVerse(int book, int chapter, int verse)
 
 void BibleView::onAnchorClicked(const QUrl &url)
 {
+    // Ссылки симфонии/MyBible: mbible:book/chapter/verse  или  B:book chapter:verse
+    const QString scheme = url.scheme().toLower();
+    if (scheme == QLatin1String("mbible") || scheme == QLatin1String("b")) {
+        int book = 0, chapter = 0, verse = 0;
+        if (scheme == QLatin1String("mbible")) {
+            // mbible:10/1/1  или path /10/1/1
+            QString p = url.path();
+            if (p.startsWith(QLatin1Char('/')))
+                p = p.mid(1);
+            if (p.isEmpty())
+                p = url.toString(QUrl::RemoveScheme);
+            const QStringList parts = p.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+            if (parts.size() >= 3) {
+                book = parts[0].toInt();
+                chapter = parts[1].toInt();
+                verse = parts[2].toInt();
+            }
+        } else {
+            // B:20 28:40
+            QString s = url.toString();
+            if (s.startsWith(QStringLiteral("B:"), Qt::CaseInsensitive))
+                s = s.mid(2);
+            QRegularExpression re(QStringLiteral("^\\s*(\\d+)\\s+(\\d+):(\\d+)"));
+            auto m = re.match(s);
+            if (m.hasMatch()) {
+                book = m.captured(1).toInt();
+                chapter = m.captured(2).toInt();
+                verse = m.captured(3).toInt();
+            }
+        }
+
+        if (book > 0 && chapter > 0 && verse > 0) {
+            // Имя книги по номеру MyBible (русские модули)
+            static const QHash<int, QString> kBooks = []() {
+                QHash<int, QString> h;
+                const struct { int n; const char *name; } t[] = {
+                    {10,"Бытие"},{20,"Исход"},{30,"Левит"},{40,"Числа"},{50,"Второзаконие"},
+                    {60,"Иисус Навин"},{70,"Судьи"},{80,"Руфь"},
+                    {90,"1 Царств"},{100,"2 Царств"},{110,"3 Царств"},{120,"4 Царств"},
+                    {130,"1 Паралипоменон"},{140,"2 Паралипоменон"},{150,"Ездра"},{160,"Неемия"},
+                    {190,"Есфирь"},{220,"Иов"},{230,"Псалтирь"},{240,"Притчи"},{250,"Екклесиаст"},
+                    {260,"Песнь Песней"},{290,"Исаия"},{300,"Иеремия"},{310,"Плач Иеремии"},
+                    {330,"Иезекииль"},{340,"Даниил"},{350,"Осия"},{360,"Иоиль"},{370,"Амос"},
+                    {380,"Авдий"},{390,"Иона"},{400,"Михей"},{410,"Наум"},{420,"Аввакум"},
+                    {430,"Софония"},{440,"Аггей"},{450,"Захария"},{460,"Малахия"},
+                    {470,"Матфей"},{480,"Марк"},{490,"Лука"},{500,"Иоанн"},{510,"Деяния"},
+                    {520,"Иаков"},{530,"1 Петра"},{540,"2 Петра"},{550,"1 Иоанна"},
+                    {560,"2 Иоанна"},{570,"3 Иоанна"},{580,"Иуда"},{590,"Римлянам"},
+                    {600,"1 Коринфянам"},{610,"2 Коринфянам"},{620,"Галатам"},{630,"Ефесянам"},
+                    {640,"Филиппийцам"},{650,"Колоссянам"},{660,"1 Фессалоникийцам"},
+                    {670,"2 Фессалоникийцам"},{680,"1 Тимофею"},{690,"2 Тимофею"},
+                    {700,"Титу"},{710,"Филимону"},{720,"Евреям"},{730,"Откровение"},
+                    // второканонические (часто в русских модулях)
+                    {165,"2 Ездры"},{170,"Товит"},{180,"Иудифь"},{270,"Премудрость Соломона"},
+                    {280,"Премудрость Сираха"},{315,"Послание Иеремии"},{320,"Варух"},
+                    {462,"1 Маккавейская"},{464,"2 Маккавейская"},{466,"3 Маккавейская"}
+                };
+                for (const auto &e : t)
+                    h.insert(e.n, QString::fromUtf8(e.name));
+                return h;
+            }();
+
+            const QString bookName = kBooks.value(book, QString::fromUtf8("Книга %1").arg(book));
+            const QString ref = QStringLiteral("%1 %2:%3").arg(bookName).arg(chapter).arg(verse);
+
+            // Пытаемся взять текст стиха из установленного синодального/библейского модуля
+            QString verseHtml;
+            const QStringList roots = {
+                QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/modules"),
+                QCoreApplication::applicationDirPath() + QStringLiteral("/../share/bibleapp/modules"),
+                QStringLiteral("/usr/share/bibleapp/modules")
+            };
+            for (const QString &root : roots) {
+                QDir dir(root);
+                if (!dir.exists())
+                    continue;
+                for (const QString &folder : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                    Module mod(dir.absoluteFilePath(folder));
+                    if (!mod.isValid() || !mod.isBibleText())
+                        continue;
+                    // сначала пробуем id = номер MyBible, затем порядковый поиск по имени
+                    QString t = mod.getVerseText(book, chapter, verse);
+                    if (t.isEmpty()) {
+                        // поиск книги по имени
+                        for (const auto &bi : mod.books()) {
+                            if (bi.fullName.contains(bookName, Qt::CaseInsensitive)
+                                || bookName.contains(bi.fullName, Qt::CaseInsensitive)) {
+                                t = mod.getVerseText(bi.id, chapter, verse);
+                                break;
+                            }
+                        }
+                    }
+                    if (!t.isEmpty()) {
+                        verseHtml = t;
+                        break;
+                    }
+                }
+                if (!verseHtml.isEmpty())
+                    break;
+            }
+
+            QString html = QStringLiteral("<div class='ref-title'>%1</div>")
+                .arg(ref.toHtmlEscaped());
+            if (!verseHtml.isEmpty()) {
+                html += QStringLiteral("<div class='verse-text'>%1</div>").arg(verseHtml);
+            } else {
+                html += QString::fromUtf8(
+                    "<p class='hint'>Текст стиха не найден в установленных библейских модулях.<br/>"
+                    "Откройте синодальный перевод в другом окне или установите модуль Библии.</p>");
+            }
+            showWordInfo(html);
+        }
+        return;
+    }
+
     if (url.scheme() == QStringLiteral("v")) {
         // Клик по номеру стиха: параллели + Стронг
         QString path = url.path();

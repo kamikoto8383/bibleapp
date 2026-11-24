@@ -300,6 +300,31 @@ bool Module::isBibleText() const
     return true;
 }
 
+
+bool Module::isDictionary() const
+{
+    if (!m_valid)
+        return false;
+    const QString t = m_type.toLower().trimmed();
+    return t.contains(QLatin1String("dict"))
+        || t.contains(QLatin1String("lexicon"))
+        || t.contains(QString::fromUtf8("слов"))
+        || t.contains(QLatin1String("concord"))
+        || t.contains(QString::fromUtf8("симфон"))
+        || t.contains(QString::fromUtf8("справ"));
+}
+
+bool Module::isCommentary() const
+{
+    if (!m_valid)
+        return false;
+    const QString t = m_type.toLower().trimmed();
+    return t.contains(QLatin1String("comment"))
+        || t.contains(QString::fromUtf8("коммент"))
+        || t.contains(QLatin1String("notes"))
+        || t.contains(QString::fromUtf8("толкован"));
+}
+
 bool Module::openDatabase() const
 {
     if (QSqlDatabase::contains(m_connectionName)) {
@@ -585,14 +610,12 @@ static QString highlightSearchTerms(const QString &escapedText, const QString &q
     const QString q = query.trimmed().simplified();
     const QString phrase = q.toHtmlEscaped();
 
-    // 1) Целая фраза (закладки)
-    if (q.contains(QLatin1Char(' ')) && phrase.length() >= 8) {
+    // 1) Целая фраза целиком (приоритет)
+    if (q.contains(QLatin1Char(' '))) {
         addMatches(phrase);
-        if (spans.isEmpty() && phrase.length() > 24)
-            addMatches(phrase.left(24));
     }
 
-    // 2) По словам длиной >= 3
+    // 2) По словам — только если фраза не нашлась
     if (spans.isEmpty()) {
         const QStringList words = q.split(QRegularExpression(QStringLiteral("\\s+")),
                                           Qt::SkipEmptyParts);
@@ -1019,16 +1042,20 @@ QVector<CrossRef> Module::lookupCrossRefs(int book, int chapter, int verse)
 }
 
 // Поиск по всем книгам модуля (вся таблица verses, без фильтра по book/chapter)
+
 QVector<SearchHit> Module::search(const QString &query, int limit) const
 {
     QVector<SearchHit> hits;
     if (!openDatabase() || query.trimmed().isEmpty())
         return hits;
 
-    const QStringList words = query.trimmed().split(QRegularExpression(QStringLiteral("\s+")),
-                                                    Qt::SkipEmptyParts);
+    const QString qNorm = query.trimmed().simplified(); // сжатые пробелы
+    const QStringList words = qNorm.split(QRegularExpression(QStringLiteral("\\s+")),
+                                          Qt::SkipEmptyParts);
     if (words.isEmpty())
         return hits;
+
+    const bool isPhrase = words.size() >= 2;
 
     auto variantsOf = [](const QString &w) {
         QStringList v;
@@ -1043,18 +1070,49 @@ QVector<SearchHit> Module::search(const QString &query, int limit) const
 
     QString sql = QStringLiteral("SELECT book, chapter, verse, text FROM verses WHERE 1=1");
     QVariantList binds;
-    for (const QString &w : words) {
-        const QStringList vars = variantsOf(w);
+
+    if (isPhrase) {
+        // Фраза целиком: несколько регистровых вариантов
+        const QStringList phraseVars = variantsOf(qNorm);
+        // также вариант только lower для кириллицы
+        QStringList likeVars = phraseVars;
+        likeVars << qNorm.toLower();
+        likeVars.removeDuplicates();
         sql += QStringLiteral(" AND (");
-        for (int i = 0; i < vars.size(); ++i) {
+        for (int i = 0; i < likeVars.size(); ++i) {
             if (i) sql += QStringLiteral(" OR ");
             sql += QStringLiteral("text LIKE ?");
-            binds << (QStringLiteral("%") + vars[i] + QStringLiteral("%"));
+            binds << (QStringLiteral("%") + likeVars[i] + QStringLiteral("%"));
         }
-        sql += QStringLiteral(")");
+        // запасной путь: все слова есть (если регистр/пробелы мешают LIKE фразы)
+        sql += QStringLiteral(" OR (");
+        for (int wi = 0; wi < words.size(); ++wi) {
+            if (wi) sql += QStringLiteral(" AND ");
+            sql += QStringLiteral("(");
+            const QStringList vars = variantsOf(words[wi]);
+            for (int i = 0; i < vars.size(); ++i) {
+                if (i) sql += QStringLiteral(" OR ");
+                sql += QStringLiteral("text LIKE ?");
+                binds << (QStringLiteral("%") + vars[i] + QStringLiteral("%"));
+            }
+            sql += QStringLiteral(")");
+        }
+        sql += QStringLiteral("))");
+    } else {
+        for (const QString &w : words) {
+            const QStringList vars = variantsOf(w);
+            sql += QStringLiteral(" AND (");
+            for (int i = 0; i < vars.size(); ++i) {
+                if (i) sql += QStringLiteral(" OR ");
+                sql += QStringLiteral("text LIKE ?");
+                binds << (QStringLiteral("%") + vars[i] + QStringLiteral("%"));
+            }
+            sql += QStringLiteral(")");
+        }
     }
+
     sql += QStringLiteral(" ORDER BY book, chapter, verse LIMIT ?");
-    binds << (limit <= 0 ? 8000 : limit);
+    binds << (limit <= 0 ? 8000 : qMax(limit * 3, 200)); // запас под фильтр фразы
 
     QSqlQuery q(m_db);
     if (!q.prepare(sql))
@@ -1065,30 +1123,66 @@ QVector<SearchHit> Module::search(const QString &query, int limit) const
         return hits;
 
     static const QRegularExpression reTags(QStringLiteral("<[^>]+>"));
+    // фраза с гибкими пробелами в plain-тексте
+    QRegularExpression phraseRe;
+    if (isPhrase) {
+        QStringList esc;
+        for (const QString &w : words)
+            esc << QRegularExpression::escape(w);
+        phraseRe.setPattern(esc.join(QStringLiteral("\\s+")));
+        phraseRe.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+    }
+
     while (q.next()) {
         QString raw = q.value(3).toString();
         QString plain = raw;
         plain.replace(reTags, QStringLiteral(" "));
         plain.replace(QChar(0x00A0), QLatin1Char(' '));
+        plain = plain.simplified();
 
-        bool ok = true;
-        for (const QString &w : words) {
-            if (!plain.contains(w, Qt::CaseInsensitive)) {
-                ok = false;
-                break;
+        if (isPhrase) {
+            // обязательна целая фраза (слова подряд)
+            if (!phraseRe.match(plain).hasMatch()
+                && !plain.contains(qNorm, Qt::CaseInsensitive)) {
+                continue;
             }
+        } else {
+            bool ok = true;
+            for (const QString &w : words) {
+                if (!plain.contains(w, Qt::CaseInsensitive)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok)
+                continue;
         }
-        if (!ok)
-            continue;
 
         SearchHit h;
         h.book = q.value(0).toInt();
         h.chapter = q.value(1).toInt();
         h.verse = q.value(2).toInt();
         h.bookName = bookNameById(h.book);
-        QString snip = plain.simplified();
-        if (snip.length() > 120)
+
+        // сниппет вокруг фразы
+        QString snip = plain;
+        int pos = plain.indexOf(qNorm, 0, Qt::CaseInsensitive);
+        if (pos < 0 && isPhrase) {
+            auto m = phraseRe.match(plain);
+            if (m.hasMatch())
+                pos = m.capturedStart();
+        }
+        if (pos >= 0) {
+            int from = qMax(0, pos - 40);
+            int len = qMin(plain.size() - from, qNorm.size() + 80);
+            snip = plain.mid(from, len);
+            if (from > 0)
+                snip.prepend(QStringLiteral("…"));
+            if (from + len < plain.size())
+                snip.append(QStringLiteral("…"));
+        } else if (snip.length() > 120) {
             snip = snip.left(117) + QStringLiteral("...");
+        }
         h.snippet = snip;
         hits.append(h);
         if (limit > 0 && hits.size() >= limit)
@@ -1096,6 +1190,7 @@ QVector<SearchHit> Module::search(const QString &query, int limit) const
     }
     return hits;
 }
+
 
 QString Module::lookupVerseStrongs(int book, int chapter, int verse)
 {

@@ -2,8 +2,11 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QListWidget>
+#include <QScrollBar>
+#include <QStyleFactory>
 #include <QLabel>
 #include <QPushButton>
+#include <QButtonGroup>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QProgressDialog>
@@ -22,12 +25,17 @@
 #include <QTextEdit>
 
 ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent,
-                                         const QString &currentModuleName)
+                                         const QString &currentModuleName,
+                                         const QString &windowTitle,
+                                         bool managementMode)
     : QDialog(parent)
     , m_manager(manager)
     , m_currentModuleName(currentModuleName)
+    , m_managementMode(managementMode)
 {
-    setWindowTitle(tr("Менеджер модулей"));
+    setWindowTitle(windowTitle.isEmpty()
+                       ? tr("Менеджер модулей")
+                       : windowTitle);
     resize(560, 420);
 
     // Фон как у окон текста (#f7f0e0), чёрный текст — без белого
@@ -88,6 +96,55 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
         "  background-color: #efe4cc;"
         "  color: #000000;"
         "}"
+        /* Скролл как в основных окнах текста */
+        "QListWidget QScrollBar:vertical {"
+        "  background: #f0e6d0;"
+        "  width: 14px;"
+        "  margin: 0;"
+        "  border-radius: 7px;"
+        "  border: none;"
+        "}"
+        "QListWidget QScrollBar::handle:vertical {"
+        "  background: #c4b090;"
+        "  min-height: 32px;"
+        "  border-radius: 7px;"
+        "  border: 1px solid #a89070;"
+        "}"
+        "QListWidget QScrollBar::handle:vertical:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QListWidget QScrollBar::add-line:vertical,"
+        "QListWidget QScrollBar::sub-line:vertical {"
+        "  height: 0; background: none;"
+        "}"
+        "QListWidget QScrollBar::add-page:vertical,"
+        "QListWidget QScrollBar::sub-page:vertical {"
+        "  background: #f0e6d0;"
+        "}"
+        "QListWidget QScrollBar:horizontal {"
+        "  background: #f0e6d0;"
+        "  height: 14px;"
+        "  margin: 0;"
+        "  border-radius: 7px;"
+        "  border: none;"
+        "}"
+        "QListWidget QScrollBar::handle:horizontal {"
+        "  background: #c4b090;"
+        "  min-width: 32px;"
+        "  border-radius: 7px;"
+        "  border: 1px solid #a89070;"
+        "}"
+        "QListWidget QScrollBar::handle:horizontal:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QListWidget QScrollBar::add-line:horizontal,"
+        "QListWidget QScrollBar::sub-line:horizontal {"
+        "  width: 0; background: none;"
+        "}"
+        "QListWidget QScrollBar::add-page:horizontal,"
+        "QListWidget QScrollBar::sub-page:horizontal {"
+        "  background: #f0e6d0;"
+        "}"
         "QPushButton {"
         "  background-color: #efe6d2;"
         "  color: #000000;"
@@ -101,7 +158,53 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
 
     auto *layout = new QVBoxLayout(this);
 
-    layout->addWidget(new QLabel(tr("Установленные модули:"), this));
+    layout->addWidget(new QLabel(
+        managementMode ? tr("Установленные модули:")
+                       : tr("Выберите книгу / модуль из библиотеки:"), this));
+
+    // Категории только в «Моя библиотека»
+    if (!managementMode) {
+        auto *catRow = new QHBoxLayout;
+        catRow->setSpacing(8);
+        m_categoryGroup = new QButtonGroup(this);
+        m_categoryGroup->setExclusive(true);
+
+        auto makeCat = [&](const QString &title, int id) -> QPushButton * {
+            auto *b = new QPushButton(title, this);
+            b->setCheckable(true);
+            b->setMinimumHeight(32);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setStyleSheet(QStringLiteral(
+                "QPushButton {"
+                "  background-color: #efe6d2;"
+                "  color: #000000;"
+                "  border: 1px solid #c4b090;"
+                "  border-radius: 4px;"
+                "  padding: 6px 14px;"
+                "  font-weight: 600;"
+                "}"
+                "QPushButton:checked {"
+                "  background-color: #d4b87a;"
+                "  border: 1px solid #a89050;"
+                "}"
+                "QPushButton:hover { background-color: #e8dcc4; }"
+                "QPushButton:checked:hover { background-color: #cdb070; }"
+            ));
+            m_categoryGroup->addButton(b, id);
+            catRow->addWidget(b);
+            return b;
+        };
+        makeCat(tr("Библия"), CatBible)->setChecked(true);
+        makeCat(tr("Словари и справочники"), CatDict);
+        makeCat(tr("Комментарии"), CatComment);
+        catRow->addStretch();
+        layout->addLayout(catRow);
+        m_category = CatBible;
+        connect(m_categoryGroup, &QButtonGroup::idClicked, this, [this](int id) {
+            m_category = id;
+            refreshList();
+        });
+    }
 
     m_list = new QListWidget(this);
     m_list->setAutoFillBackground(true);
@@ -120,6 +223,82 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
         }
         m_list->setPalette(lp);
     }
+
+    // Чтобы CSS скролла не перебивала тема GTK/Mint — Fusion + стили на сам список
+    if (QStyle *fusion = QStyleFactory::create(QStringLiteral("Fusion")))
+        m_list->setStyle(fusion);
+    m_list->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_list->setStyleSheet(QStringLiteral(
+        "QListWidget {"
+        "  background-color: #f7f0e0;"
+        "  color: #000000;"
+        "  border: 1px solid #c4b090;"
+        "  outline: 0;"
+        "  font-size: 13px;"
+        "}"
+        "QListWidget::item {"
+        "  background-color: #f7f0e0;"
+        "  color: #000000;"
+        "  padding: 10px 12px;"
+        "  min-height: 22px;"
+        "  border: none;"
+        "  border-bottom: 1px solid #e0d4bc;"
+        "}"
+        "QListWidget::item:selected {"
+        "  background-color: #e8d4a8;"
+        "  color: #000000;"
+        "}"
+        "QListWidget::item:hover {"
+        "  background-color: #efe4cc;"
+        "  color: #000000;"
+        "}"
+        "QScrollBar:vertical {"
+        "  background: #f0e6d0;"
+        "  width: 16px;"
+        "  margin: 0px;"
+        "  border: none;"
+        "}"
+        "QScrollBar::handle:vertical {"
+        "  background: #c4b090;"
+        "  min-height: 40px;"
+        "  border-radius: 6px;"
+        "  border: 1px solid #a89070;"
+        "  margin: 2px;"
+        "}"
+        "QScrollBar::handle:vertical:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        "  height: 0; width: 0; border: none; background: none;"
+        "}"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+        "  background: #f0e6d0;"
+        "}"
+        "QScrollBar:horizontal {"
+        "  background: #f0e6d0;"
+        "  height: 16px;"
+        "  margin: 0px;"
+        "  border: none;"
+        "}"
+        "QScrollBar::handle:horizontal {"
+        "  background: #c4b090;"
+        "  min-width: 40px;"
+        "  border-radius: 6px;"
+        "  border: 1px solid #a89070;"
+        "  margin: 2px;"
+        "}"
+        "QScrollBar::handle:horizontal:hover {"
+        "  background: #b09a78;"
+        "}"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {"
+        "  height: 0; width: 0; border: none; background: none;"
+        "}"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {"
+        "  background: #f0e6d0;"
+        "}"
+    ));
+
     layout->addWidget(m_list, 1);
 
     m_infoLabel = new QLabel(this);
@@ -148,6 +327,14 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
     connect(m_myBibleBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onConvertMyBible);
     connect(m_openBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onOpenSelected);
     connect(m_deleteBtn, &QPushButton::clicked, this, &ModuleManagerDialog::onDeleteSelected);
+
+    // Режим «Моя библиотека» — только выбор книги, без конвертеров
+    if (!managementMode) {
+        m_convertBtn->setVisible(false);
+        m_myBibleBtn->setVisible(false);
+        m_deleteBtn->setVisible(false);
+        m_openBtn->setText(tr("Открыть"));
+    }
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
     connect(m_list, &QListWidget::itemSelectionChanged, this, &ModuleManagerDialog::onSelectionChanged);
     connect(m_list, &QListWidget::itemDoubleClicked, this, [this]() { onOpenSelected(); });
@@ -155,36 +342,59 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
     refreshList();
 }
 
+
 void ModuleManagerDialog::refreshList()
 {
     m_list->clear();
     m_manager->loadModules();
 
     QListWidgetItem *currentItem = nullptr;
+    int shown = 0;
     for (int i = 0; i < m_manager->modules().size(); ++i) {
         Module *m = m_manager->moduleAt(i);
+        if (!m || !m->isValid())
+            continue;
+
+        // В «Моя библиотека» фильтруем по категории
+        if (!m_managementMode) {
+            const int cat = classifyModule(m);
+            if (m_category != CatAll && cat != m_category)
+                continue;
+        }
+
         auto *item = new QListWidgetItem(m->name(), m_list);
         item->setData(Qt::UserRole, i);
-        item->setToolTip(m->description());
-        // Бумажный фон + чёрный текст
+        QString tip = m->description();
+        const int cat = classifyModule(m);
+        QString catName;
+        if (cat == CatBible)
+            catName = QString::fromUtf8("Библия");
+        else if (cat == CatDict)
+            catName = QString::fromUtf8("Словарь / справочник");
+        else if (cat == CatComment)
+            catName = QString::fromUtf8("Комментарий");
+        else
+            catName = m->type();
+        if (!tip.isEmpty())
+            tip = catName + QStringLiteral("\n") + tip;
+        else
+            tip = catName;
+        item->setToolTip(tip);
         item->setData(Qt::ForegroundRole, QBrush(QColor(0, 0, 0)));
         item->setData(Qt::BackgroundRole, QBrush(QColor(0xf7, 0xf0, 0xe0)));
         item->setForeground(QBrush(QColor(0, 0, 0)));
         item->setBackground(QBrush(QColor(0xf7, 0xf0, 0xe0)));
-        item->setSizeHint(QSize(0, 36));
+        item->setSizeHint(QSize(item->sizeHint().width(), 36));
 
         if (!m_currentModuleName.isEmpty() && m->name() == m_currentModuleName) {
+            item->setData(Qt::BackgroundRole, QBrush(QColor(0xe0, 0xd0, 0xa0)));
+            item->setBackground(QBrush(QColor(0xe0, 0xd0, 0xa0)));
             QFont f = item->font();
             f.setBold(true);
             item->setFont(f);
-            item->setData(Qt::BackgroundRole, QBrush(QColor(0xe8, 0xc8, 0x78)));
-            item->setData(Qt::ForegroundRole, QBrush(QColor(0, 0, 0)));
-            item->setBackground(QBrush(QColor(0xe8, 0xc8, 0x78)));
-            item->setForeground(QBrush(QColor(0, 0, 0)));
-            item->setToolTip(tr("Сейчас открыт в этом окне") + QStringLiteral("\n") + m->description());
-            item->setText(QString::fromUtf8("●  ") + m->name() + tr("  — открыт"));
             currentItem = item;
         }
+        ++shown;
     }
 
     if (currentItem) {
@@ -192,15 +402,50 @@ void ModuleManagerDialog::refreshList()
         m_list->scrollToItem(currentItem);
     }
 
-    if (m_list->count() == 0) {
-        m_infoLabel->setText(tr("Нет установленных модулей. Создайте тестовый или сконвертируйте модуль из «Цитаты из Библии»."));
+    if (shown == 0) {
+        if (!m_managementMode) {
+            QString what;
+            if (m_category == CatBible)
+                what = tr("библейских переводов");
+            else if (m_category == CatDict)
+                what = tr("словарей и справочников");
+            else if (m_category == CatComment)
+                what = tr("комментариев");
+            else
+                what = tr("модулей");
+            m_infoLabel->setText(tr("Нет установленных %1 в этой категории.\n"
+                                    "Добавьте модуль через «Менеджер модулей».").arg(what));
+        } else {
+            m_infoLabel->setText(tr("Нет установленных модулей. Создайте тестовый или сконвертируйте модуль из «Цитаты из Библии»."));
+        }
     } else if (!m_currentModuleName.isEmpty()) {
         m_infoLabel->setText(tr("Модулей: %1. Сейчас открыт: «%2»")
-                                 .arg(m_list->count()).arg(m_currentModuleName));
+                                 .arg(shown).arg(m_currentModuleName));
     } else {
-        m_infoLabel->setText(tr("Модулей: %1").arg(m_list->count()));
+        m_infoLabel->setText(tr("Модулей: %1").arg(shown));
     }
     onSelectionChanged();
+}
+
+int ModuleManagerDialog::classifyModule(Module *m)
+{
+    if (!m || !m->isValid())
+        return CatAll;
+    if (m->isCommentary())
+        return CatComment;
+    if (m->isDictionary())
+        return CatDict;
+    if (m->isBibleText())
+        return CatBible;
+    // эвристика по имени
+    const QString n = (m->name() + QLatin1Char(' ') + m->type()).toLower();
+    if (n.contains(QString::fromUtf8("коммент")) || n.contains(QLatin1String("comment")))
+        return CatComment;
+    if (n.contains(QString::fromUtf8("слов")) || n.contains(QLatin1String("dict"))
+        || n.contains(QString::fromUtf8("симфон")) || n.contains(QLatin1String("concord"))
+        || n.contains(QString::fromUtf8("справ")) || n.contains(QLatin1String("lexicon")))
+        return CatDict;
+    return CatBible;
 }
 
 void ModuleManagerDialog::onSelectionChanged()
