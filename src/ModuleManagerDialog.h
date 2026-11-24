@@ -32,7 +32,7 @@ private slots:
     void onDeleteSelected();
 
 private:
-    enum Category { CatAll = 0, CatBible = 1, CatDict = 2, CatComment = 3 };
+    enum Category { CatAll = 0, CatBible = 1, CatDict = 2, CatComment = 3, CatExposition = 4, CatInterlinear = 5 };
     static int classifyModule(Module *m);
 
     ModuleManager *m_manager = nullptr;

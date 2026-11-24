@@ -180,8 +180,9 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
                 "  color: #000000;"
                 "  border: 1px solid #c4b090;"
                 "  border-radius: 4px;"
-                "  padding: 6px 14px;"
+                "  padding: 6px 8px;"
                 "  font-weight: 600;"
+                "  font-size: 12px;"
                 "}"
                 "QPushButton:checked {"
                 "  background-color: #d4b87a;"
@@ -197,6 +198,8 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
         makeCat(tr("Библия"), CatBible)->setChecked(true);
         makeCat(tr("Словари и справочники"), CatDict);
         makeCat(tr("Комментарии"), CatComment);
+        makeCat(tr("Толкования"), CatExposition);
+        makeCat(tr("Подстрочники"), CatInterlinear);
         catRow->addStretch();
         layout->addLayout(catRow);
         m_category = CatBible;
@@ -373,6 +376,10 @@ void ModuleManagerDialog::refreshList()
             catName = QString::fromUtf8("Словарь / справочник");
         else if (cat == CatComment)
             catName = QString::fromUtf8("Комментарий");
+        else if (cat == CatExposition)
+            catName = QString::fromUtf8("Толкование");
+        else if (cat == CatInterlinear)
+            catName = QString::fromUtf8("Подстрочник");
         else
             catName = m->type();
         if (!tip.isEmpty())
@@ -411,6 +418,10 @@ void ModuleManagerDialog::refreshList()
                 what = tr("словарей и справочников");
             else if (m_category == CatComment)
                 what = tr("комментариев");
+            else if (m_category == CatExposition)
+                what = tr("толкований");
+            else if (m_category == CatInterlinear)
+                what = tr("подстрочников");
             else
                 what = tr("модулей");
             m_infoLabel->setText(tr("Нет установленных %1 в этой категории.\n"
@@ -431,20 +442,35 @@ int ModuleManagerDialog::classifyModule(Module *m)
 {
     if (!m || !m->isValid())
         return CatAll;
-    if (m->isCommentary())
+
+    const QString t = m->type().toLower();
+    const QString n = (m->name() + QLatin1Char(' ') + t).toLower();
+
+    // Подстрочники
+    if (t.contains(QLatin1String("interlinear")) || t.contains(QString::fromUtf8("подстроч"))
+        || n.contains(QLatin1String("interlinear")) || n.contains(QString::fromUtf8("подстроч"))
+        || (n.contains(QString::fromUtf8("иврит")) && n.contains(QString::fromUtf8("греч"))))
+        return CatInterlinear;
+
+    // Толкования — отдельно от комментариев
+    if (t.contains(QString::fromUtf8("толкован")) || t.contains(QLatin1String("exposit"))
+        || t.contains(QLatin1String("interpret"))
+        || n.contains(QString::fromUtf8("толкован")) || n.contains(QLatin1String("exposit")))
+        return CatExposition;
+
+    if (m->isCommentary()
+        || n.contains(QString::fromUtf8("коммент")) || n.contains(QLatin1String("comment")))
         return CatComment;
-    if (m->isDictionary())
-        return CatDict;
-    if (m->isBibleText())
-        return CatBible;
-    // эвристика по имени
-    const QString n = (m->name() + QLatin1Char(' ') + m->type()).toLower();
-    if (n.contains(QString::fromUtf8("коммент")) || n.contains(QLatin1String("comment")))
-        return CatComment;
-    if (n.contains(QString::fromUtf8("слов")) || n.contains(QLatin1String("dict"))
+
+    if (m->isDictionary()
+        || n.contains(QString::fromUtf8("слов")) || n.contains(QLatin1String("dict"))
         || n.contains(QString::fromUtf8("симфон")) || n.contains(QLatin1String("concord"))
         || n.contains(QString::fromUtf8("справ")) || n.contains(QLatin1String("lexicon")))
         return CatDict;
+
+    if (m->isBibleText())
+        return CatBible;
+
     return CatBible;
 }
 
