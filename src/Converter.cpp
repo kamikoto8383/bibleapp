@@ -557,12 +557,15 @@ static int firstNumberInText(const QString &s, int maxValue = 300)
 
 static void parseRangeInText(const QString &s, int &start, int &end)
 {
+    // «1-6», «1–6а», «6б-11», «12-16»
     static const QRegularExpression reRange(
-        QStringLiteral("(\\d{1,3})\\s*[-–—]\\s*(\\d{1,3})"));
+        QStringLiteral("(\\d{1,3})[a-zA-Zа-яА-ЯёЁ]?\\s*[-–—]\\s*(\\d{1,3})[a-zA-Zа-яА-ЯёЁ]?"));
     const auto rm = reRange.match(s);
     if (rm.hasMatch()) {
         start = rm.captured(1).toInt();
         end = rm.captured(2).toInt();
+        if (end < start)
+            end = start;
         return;
     }
     start = firstNumberInText(s);
@@ -1076,10 +1079,16 @@ static QString cleanVerseText(QString text, int verseNum, bool stripLeading,
 // ============================================================================
 
 static bool upsertVerse(QSqlQuery &select, QSqlQuery &insert, int bookId, int chapter,
-                        int verse, const QString &text)
+                        int verse, const QString &text, bool allowEmpty = false)
 {
-    if (text.trimmed().isEmpty())
-        return false;
+    // Для библейских модулей (как в Синодальном) сохраняем номер стиха
+    // даже если текст пустой или только сноска «*».
+    QString store = text;
+    if (store.trimmed().isEmpty()) {
+        if (!allowEmpty)
+            return false;
+        store = QString(QChar(0x200B)); // zero-width space — маркер пустого стиха
+    }
 
     QString existing;
     select.bindValue(0, bookId);
@@ -1088,14 +1097,21 @@ static bool upsertVerse(QSqlQuery &select, QSqlQuery &insert, int bookId, int ch
     if (select.exec() && select.next())
         existing = select.value(0).toString();
 
-    QString merged = text;
+    QString merged = store;
     if (!existing.isEmpty()) {
-        if (existing.contains(text))
+        const bool existEmpty = existing.trimmed().isEmpty()
+                                || existing == QString(QChar(0x200B));
+        const bool storeEmpty = store == QString(QChar(0x200B));
+        if (!existEmpty && storeEmpty)
+            return false; // не затираем реальный текст пустышкой
+        if (existing.contains(store) && !storeEmpty)
             return false;
-        if (text.contains(existing))
-            merged = text;
-        else
-            merged = existing + QLatin1Char('\n') + text;
+        if (store.contains(existing) && !existEmpty)
+            merged = store;
+        else if (!existEmpty && !storeEmpty)
+            merged = existing + QLatin1Char('\n') + store;
+        else if (existEmpty)
+            merged = store;
     }
 
     insert.bindValue(0, bookId);
@@ -1329,8 +1345,31 @@ static int parseChapterChunk(const QString &chunk, int chapterNum, int bookId,
         if (i == 0)
             attachPrefix(m.num, cleaned);
 
-        if (cleaned.length() >= 2 && upsertVerse(select, insert, bookId, chapterNum, m.num, cleaned))
+        // Сноски вида «*» / пустой текст после диапазона (1-6а) — в библейских
+        // модулях всё равно сохраняем номер стиха, как в Синодальном.
+        static const QRegularExpression reOnlyFoot(
+            QStringLiteral(R"(^[*†‡§·•\s]+$)"));
+        if (reOnlyFoot.match(cleaned.trimmed()).hasMatch())
+            cleaned.clear();
+
+        const bool allowEmpty = !commentary;
+        if ((cleaned.length() >= 1 || allowEmpty)
+            && upsertVerse(select, insert, bookId, chapterNum, m.num, cleaned, allowEmpty)) {
             ++inserted;
+        }
+
+        // Диапазон «1-6» без отдельных маркеров 2..5 — дописываем пустые стихи
+        if (!commentary && m.endNum > m.num + 1) {
+            QSet<int> have;
+            for (const VerseMark &mm : marks)
+                have.insert(mm.num);
+            for (int v = m.num + 1; v < m.endNum; ++v) {
+                if (have.contains(v))
+                    continue;
+                if (upsertVerse(select, insert, bookId, chapterNum, v, QString(), true))
+                    ++inserted;
+            }
+        }
     }
     return inserted;
 }

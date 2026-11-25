@@ -777,10 +777,13 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
     while (query.next()) {
         int v = query.value(0).toInt();
         QString text = query.value(1).toString();
+        // Пустой стих (заполнитель после диапазона 1–6) — только номер
+        if (text.trimmed().isEmpty() || text == QString(QChar(0x200B)))
+            text.clear();
 
-        if (text.contains(QLatin1Char('<')))
+        if (!text.isEmpty() && text.contains(QLatin1Char('<')))
             text = sanitizeStoredVerseHtml(text);
-        else
+        else if (!text.isEmpty())
             text = text.toHtmlEscaped();
 
         // Убираем ведущий номер стиха, если он остался в сохранённом тексте

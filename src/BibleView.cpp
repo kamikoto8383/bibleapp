@@ -9,6 +9,10 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QStandardItemModel>
+#include <QStyledItemDelegate>
+#include <QListView>
+#include <QStandardItem>
 #include <QFrame>
 #include <QAbstractItemView>
 #include <QFontComboBox>
@@ -836,12 +840,14 @@ void BibleView::onPrevChapter()
         return;
     }
 
-    const int bookIdx = m_bookCombo->currentIndex();
-    if (bookIdx > 0) {
+    int bookIdx = m_bookCombo->currentIndex() - 1;
+    while (bookIdx >= 0 && m_bookCombo->itemData(bookIdx).toInt() <= 0)
+        --bookIdx;
+    if (bookIdx >= 0) {
         m_bookCombo->blockSignals(true);
-        m_bookCombo->setCurrentIndex(bookIdx - 1);
+        m_bookCombo->setCurrentIndex(bookIdx);
         m_bookCombo->blockSignals(false);
-        m_currentBook = m_bookCombo->currentData().toInt();
+        m_currentBook = m_bookCombo->itemData(bookIdx).toInt();
         const QVector<int> chapters = m_module->chapterNumbers(m_currentBook);
         const int last = chapters.isEmpty() ? 1 : chapters.last();
         fillChapterCombo(m_currentBook, last);
@@ -869,12 +875,14 @@ void BibleView::onNextChapter()
         return;
     }
 
-    const int bookIdx = m_bookCombo->currentIndex();
-    if (bookIdx + 1 < m_bookCombo->count()) {
+    int bookIdx = m_bookCombo->currentIndex() + 1;
+    while (bookIdx < m_bookCombo->count() && m_bookCombo->itemData(bookIdx).toInt() <= 0)
+        ++bookIdx;
+    if (bookIdx < m_bookCombo->count()) {
         m_bookCombo->blockSignals(true);
-        m_bookCombo->setCurrentIndex(bookIdx + 1);
+        m_bookCombo->setCurrentIndex(bookIdx);
         m_bookCombo->blockSignals(false);
-        m_currentBook = m_bookCombo->currentData().toInt();
+        m_currentBook = m_bookCombo->itemData(bookIdx).toInt();
         fillChapterCombo(m_currentBook, 1);
         m_currentChapter = m_chapterCombo->currentData().toInt();
         m_currentVerse = 1;
@@ -1354,6 +1362,143 @@ void BibleView::applyTextStyle()
     );
 }
 
+namespace {
+
+bool isNewTestamentBookName(const QString &fullName)
+{
+    const QString n = fullName.trimmed().toLower()
+                          .replace(QString::fromUtf8("ё"), QString::fromUtf8("е"));
+    // Новый Завет начинается с Евангелий
+    if (n.contains(QString::fromUtf8("иудиф")))
+        return false;
+    if (n.contains(QString::fromUtf8("от матфе")) || n.startsWith(QString::fromUtf8("матфе"))
+        || n.contains(QString::fromUtf8("ев. от матф")))
+        return true;
+    if (n.contains(QString::fromUtf8("от марк")) || n.startsWith(QString::fromUtf8("марк")))
+        return true;
+    if (n.contains(QString::fromUtf8("от лук")) || n.startsWith(QString::fromUtf8("лук")))
+        return true;
+    if (n.contains(QString::fromUtf8("от иоанн")) || n.contains(QString::fromUtf8("евангелие от иоанн")))
+        return true;
+    if (n.startsWith(QString::fromUtf8("деяния")) || n.contains(QString::fromUtf8("деяния апостол")))
+        return true;
+    if (n.contains(QString::fromUtf8("римлян")))
+        return true;
+    if (n.contains(QString::fromUtf8("коринф")))
+        return true;
+    if (n.contains(QString::fromUtf8("галат")))
+        return true;
+    if (n.contains(QString::fromUtf8("ефес")))
+        return true;
+    if (n.contains(QString::fromUtf8("филиппи")))
+        return true;
+    if (n.contains(QString::fromUtf8("колосс")))
+        return true;
+    if (n.contains(QString::fromUtf8("фессалон")))
+        return true;
+    if (n.contains(QString::fromUtf8("тимоф")))
+        return true;
+    if (n.startsWith(QString::fromUtf8("титу")) || n.contains(QString::fromUtf8("к титу")))
+        return true;
+    if (n.contains(QString::fromUtf8("филимон")))
+        return true;
+    if (n.contains(QString::fromUtf8("евреям")))
+        return true;
+    if (n.contains(QString::fromUtf8("иаков")))
+        return true;
+    if (n.contains(QString::fromUtf8("петра")))
+        return true;
+    if (n.contains(QString::fromUtf8("иоанна")) && (n.contains(QLatin1Char('1')) || n.contains(QLatin1Char('2'))
+            || n.contains(QLatin1Char('3')) || n.contains(QString::fromUtf8("1-"))
+            || n.contains(QString::fromUtf8("2-")) || n.contains(QString::fromUtf8("3-"))))
+        return true;
+    if (n.contains(QString::fromUtf8("иуды")) || n.startsWith(QString::fromUtf8("иуда"))
+        || n.contains(QString::fromUtf8("послание иуды")))
+        return true;
+    if (n.contains(QString::fromUtf8("откровен")) || n.contains(QString::fromUtf8("апокалипс")))
+        return true;
+    // MyBible / числовые id часто: >= 470 Матфей
+    return false;
+}
+
+/** Делегат: заголовки ВЗ/НЗ по центру выпадающего списка */
+class BookComboDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        const int bookId = index.data(Qt::UserRole).toInt();
+        if (bookId <= 0) {
+            QStyleOptionViewItem opt = option;
+            initStyleOption(&opt, index);
+            opt.displayAlignment = Qt::AlignCenter;
+            // Яркий цвет заголовка
+            opt.palette.setColor(QPalette::Text, QColor(0xe6, 0x7e, 0x00));
+            opt.palette.setColor(QPalette::WindowText, QColor(0xe6, 0x7e, 0x00));
+            opt.palette.setColor(QPalette::HighlightedText, QColor(0xe6, 0x7e, 0x00));
+            QFont f = opt.font;
+            f.setBold(true);
+            opt.font = f;
+            opt.fontMetrics = QFontMetrics(f);
+
+            painter->save();
+            // Фон как у остальных пунктов
+            if (opt.state & QStyle::State_Selected)
+                painter->fillRect(opt.rect, opt.palette.highlight());
+            else
+                painter->fillRect(opt.rect, opt.palette.base());
+
+            painter->setPen(QColor(0xe6, 0x7e, 0x00));
+            painter->setFont(f);
+            painter->drawText(opt.rect, Qt::AlignCenter, index.data(Qt::DisplayRole).toString());
+            painter->restore();
+            return;
+        }
+        QStyledItemDelegate::paint(painter, option, index);
+    }
+};
+
+void ensureBookComboDelegate(QComboBox *combo)
+{
+    if (!combo || !combo->view())
+        return;
+    if (combo->view()->itemDelegate() && combo->view()->itemDelegate()->property("bookComboDelegate").toBool())
+        return;
+    auto *del = new BookComboDelegate(combo);
+    del->setProperty("bookComboDelegate", true);
+    combo->setItemDelegate(del);
+    if (auto *lv = qobject_cast<QListView *>(combo->view()))
+        lv->setTextElideMode(Qt::ElideNone);
+}
+
+void addBookComboHeader(QComboBox *combo, const QString &title)
+{
+    if (!combo)
+        return;
+    ensureBookComboDelegate(combo);
+    const int row = combo->count();
+    combo->addItem(title);
+    combo->setItemData(row, -1); // не книга
+    combo->setItemData(row, int(Qt::AlignCenter), Qt::TextAlignmentRole);
+    if (auto *model = qobject_cast<QStandardItemModel *>(combo->model())) {
+        if (QStandardItem *it = model->item(row)) {
+            it->setFlags(Qt::ItemIsEnabled); // виден, но ниже отключим selectable через id
+            it->setFlags(it->flags() & ~Qt::ItemIsSelectable);
+            QFont f = it->font();
+            f.setBold(true);
+            it->setFont(f);
+            it->setForeground(QBrush(QColor(0xe6, 0x7e, 0x00)));
+            it->setTextAlignment(Qt::AlignCenter);
+            it->setData(int(Qt::AlignCenter), Qt::TextAlignmentRole);
+        }
+    }
+}
+
+} // namespace
+
 void BibleView::setModule(Module *module)
 {
     const bool prevBlock = m_blockSettingsSave;
@@ -1361,6 +1506,7 @@ void BibleView::setModule(Module *module)
 
     m_module = module;
     m_bookCombo->clear();
+    ensureBookComboDelegate(m_bookCombo);
     m_searchResults->clear();
     m_parallelList->clear();
 
@@ -1373,14 +1519,40 @@ void BibleView::setModule(Module *module)
     }
 
     m_moduleLabel->setText(m_module->name());
-    for (const auto &book : m_module->books())
+
+    const QVector<BookInfo> books = m_module->books();
+    const bool showTestaments = m_module->isBibleText() && !m_module->isDictionary()
+                                && books.size() >= 10;
+    bool otHeader = false;
+    bool ntHeader = false;
+    for (const auto &book : books) {
+        if (showTestaments) {
+            const bool isNT = isNewTestamentBookName(book.fullName)
+                              || book.id >= 470; // MyBible: Матфей = 470
+            // Порядковый канон 1..66: НЗ с 40
+            const bool isNTSeq = (book.id >= 40 && book.id <= 66 && book.id < 100);
+            const bool nt = isNT || isNTSeq;
+            if (!nt && !otHeader) {
+                addBookComboHeader(m_bookCombo, QString::fromUtf8("—— Ветхий Завет ——"));
+                otHeader = true;
+            }
+            if (nt && !ntHeader) {
+                addBookComboHeader(m_bookCombo, QString::fromUtf8("—— Новый Завет ——"));
+                ntHeader = true;
+            }
+        }
         m_bookCombo->addItem(book.fullName, book.id);
+    }
 
     loadBookmarks();
 
-    if (m_bookCombo->count() > 0) {
-        m_bookCombo->setCurrentIndex(0);
-        onBookChanged(0);
+    // Первая реальная книга, не заголовок
+    int first = 0;
+    while (first < m_bookCombo->count() && m_bookCombo->itemData(first).toInt() <= 0)
+        ++first;
+    if (first < m_bookCombo->count()) {
+        m_bookCombo->setCurrentIndex(first);
+        onBookChanged(first);
     }
     m_blockSettingsSave = prevBlock;
 }
@@ -1419,6 +1591,21 @@ void BibleView::onBookChanged(int index)
 {
     if (!m_module || index < 0)
         return;
+    const int bookId = m_bookCombo->itemData(index).toInt();
+    // Заголовок «Ветхий/Новый Завет» — не выбирать
+    if (bookId <= 0) {
+        int next = index + 1;
+        while (next < m_bookCombo->count() && m_bookCombo->itemData(next).toInt() <= 0)
+            ++next;
+        if (next < m_bookCombo->count()) {
+            m_bookCombo->blockSignals(true);
+            m_bookCombo->setCurrentIndex(next);
+            m_bookCombo->blockSignals(false);
+            index = next;
+        } else {
+            return;
+        }
+    }
     m_currentBook = m_bookCombo->itemData(index).toInt();
     fillChapterCombo(m_currentBook, 1);
     m_currentChapter = m_chapterCombo->currentData().toInt();
