@@ -73,9 +73,7 @@ Module* ModuleManager::moduleAt(int index) const
 
 bool ModuleManager::ensureTestModule()
 {
-    bool ok = true;
-
-    // Полный синодальный перевод из /usr/share/bibleapp/modules/synodal
+    // Встроенный Синодальный перевод (слова Иисуса — красным)
     QString synPath = m_modulesPath + "/synodal";
     if (!(QDir(synPath).exists() && QFile::exists(synPath + "/data.sqlite"))) {
         QStringList candidates;
@@ -92,31 +90,8 @@ bool ModuleManager::ensureTestModule()
         }
     }
 
-    QString testPath = m_modulesPath + "/synodal_test";
-    if (!(QDir(testPath).exists() && QFile::exists(testPath + "/module.json"))) {
-        if (!Module::createTestModule(testPath))
-            ok = false;
-    }
-
-    // Полный подстрочник 66 книг
-    QString ilPath = m_modulesPath + "/interlinear";
-    if (!(QDir(ilPath).exists() && QFile::exists(ilPath + "/data.sqlite"))) {
-        QStringList candidates;
-        candidates << "/usr/share/bibleapp/modules/interlinear";
-        candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/modules/interlinear";
-        candidates << QCoreApplication::applicationDirPath() + "/modules/interlinear";
-        for (const QString &src : candidates) {
-            if (QDir(src).exists() && QFile::exists(src + "/data.sqlite")) {
-                QDir().mkpath(ilPath);
-                QFile::copy(src + "/data.sqlite", ilPath + "/data.sqlite");
-                QFile::copy(src + "/module.json", ilPath + "/module.json");
-                break;
-            }
-        }
-    }
-
     loadModules();
-    return ok;
+    return true;
 }
 
 bool ModuleManager::importConvertedModule(const QString &sourcePath, const QString &name)

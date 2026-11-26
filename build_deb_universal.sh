@@ -156,13 +156,11 @@ if [ "$MAKE_DEB" -eq 1 ]; then
         cp -r resources/fonts "$STAGE/usr/share/bibleapp/fonts"
     fi
 
-    # Встроенные модули (synodal, interlinear)
+    # Встроенный Синодальный перевод
     mkdir -p "$STAGE/usr/share/bibleapp/modules"
-    for mod in synodal interlinear; do
-        if [ -d "resources/modules/$mod" ]; then
-            cp -r "resources/modules/$mod" "$STAGE/usr/share/bibleapp/modules/$mod"
-        fi
-    done
+    if [ -d "resources/modules/synodal" ]; then
+        cp -r "resources/modules/synodal" "$STAGE/usr/share/bibleapp/modules/synodal"
+    fi
 
     # Ярлык
     mkdir -p "$STAGE/usr/share/applications"
@@ -222,11 +220,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
         sudo mkdir -p /usr/share/bibleapp/modules /usr/share/bibleapp/fonts /usr/share/pixmaps
         sudo cp resources/*.sqlite /usr/share/bibleapp/ 2>/dev/null || true
         sudo cp -r resources/fonts/* /usr/share/bibleapp/fonts/ 2>/dev/null || true
-        for mod in synodal interlinear; do
-            [ -d "resources/modules/$mod" ] || continue
-            sudo mkdir -p "/usr/share/bibleapp/modules/$mod"
-            sudo cp -r "resources/modules/$mod/." "/usr/share/bibleapp/modules/$mod/"
-        done
+        # встроенные модули не копируем
         sudo cp resources/bibleapp.png /usr/share/pixmaps/bibleapp.png
         printf '%s\n' \
             '[Desktop Entry]' \

@@ -22,14 +22,11 @@ make -j"$(nproc)"
 echo "==> Установка в /usr/local ..."
 sudo cmake --install . 2>/dev/null || {
   sudo cp bibleapp /usr/local/bin/bibleapp
-  sudo mkdir -p /usr/share/bibleapp/modules/synodal \
-                /usr/share/bibleapp/modules/interlinear \
+  sudo mkdir -p /usr/share/bibleapp/modules \
                 /usr/share/bibleapp/fonts \
                 /usr/share/pixmaps \
                 /usr/share/applications
   sudo cp -r ../resources/*.sqlite /usr/share/bibleapp/ 2>/dev/null || true
-  sudo cp -r ../resources/modules/synodal/* /usr/share/bibleapp/modules/synodal/ 2>/dev/null || true
-  sudo cp -r ../resources/modules/interlinear/* /usr/share/bibleapp/modules/interlinear/ 2>/dev/null || true
   sudo cp ../resources/fonts/*.ttf /usr/share/bibleapp/fonts/ 2>/dev/null || true
   sudo cp ../resources/bibleapp.png /usr/share/pixmaps/bibleapp.png 2>/dev/null || true
   cat << 'DESK' | sudo tee /usr/share/applications/bibleapp.desktop >/dev/null

@@ -10,8 +10,10 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QRegularExpression>
 #include <QSet>
+#include <QPair>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -183,6 +185,8 @@ static bool hasDictionaryIdxFiles(const QString &path)
                           QDir::Files).isEmpty();
 }
 
+static QString locateBookFile(const QString &moduleRoot, const QString &pathName);
+
 static IniData parseIni(const QString &iniPath)
 {
     IniData ini;
@@ -201,20 +205,44 @@ static IniData parseIni(const QString &iniPath)
         QString line = rawLine.trimmed();
         if (line.isEmpty())
             continue;
-        if (line.startsWith(QLatin1Char(';')) || line.startsWith(QLatin1Char('#'))
-            || line.startsWith(QStringLiteral("//")))
+        // комментарии ; # //  — но не трогаем строки с '='
+        if ((line.startsWith(QLatin1Char(';')) || line.startsWith(QLatin1Char('#'))
+             || line.startsWith(QStringLiteral("//")))
+            && !line.contains(QLatin1Char('=')))
             continue;
         if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']')))
             continue;
 
-        const int eq = line.indexOf(QLatin1Char('='));
-        if (eq <= 0)
-            continue;
+        // убрать хвостовой комментарий после значения: PathName=1Ti.htm ; Timothy
+        int eq = line.indexOf(QLatin1Char('='));
+        if (eq <= 0) {
+            // иногда бывает "PathName book.htm" без '='
+            const QString low = line.toLower();
+            if (low.startsWith(QStringLiteral("pathname ")) || low.startsWith(QStringLiteral("pathname\t"))) {
+                eq = 8;
+                line = QStringLiteral("pathname=") + line.mid(9).trimmed();
+                eq = line.indexOf(QLatin1Char('='));
+            } else {
+                continue;
+            }
+        }
 
-        const QString key = line.left(eq).trimmed().toLower();
-        const QString value = line.mid(eq + 1).trimmed();
+        QString key = line.left(eq).trimmed().toLower();
+        QString value = line.mid(eq + 1).trimmed();
+        // срезать inline-комментарий
+        int semi = value.indexOf(QLatin1Char(';'));
+        if (semi > 0)
+            value = value.left(semi).trimmed();
+        // PathName1 / FullName2 → pathname / fullname
+        while (!key.isEmpty() && key.back().isDigit())
+            key.chop(1);
 
-        if (key == QLatin1String("pathname")) {
+        const bool isPath = (key == QLatin1String("pathname")
+                             || key == QLatin1String("filename")
+                             || key == QLatin1String("filepath")
+                             || key == QLatin1String("file")
+                             || key == QLatin1String("path"));
+        if (isPath) {
             if (hasCur)
                 ini.books.append(cur);
             cur = IniBook();
@@ -224,11 +252,15 @@ static IniData parseIni(const QString &iniPath)
         }
 
         if (hasCur) {
-            if (key == QLatin1String("fullname"))
+            if (key == QLatin1String("fullname") || key == QLatin1String("bookname")
+                || key == QLatin1String("name") || key == QLatin1String("full_name")
+                || key == QLatin1String("title"))
                 cur.fullName = value;
-            else if (key == QLatin1String("shortname"))
+            else if (key == QLatin1String("shortname") || key == QLatin1String("short_name")
+                     || key == QLatin1String("abbr") || key == QLatin1String("abbreviation"))
                 cur.shortName = value;
-            else if (key == QLatin1String("chapterqty"))
+            else if (key == QLatin1String("chapterqty") || key == QLatin1String("chapters")
+                     || key == QLatin1String("chaptercount") || key == QLatin1String("chapter_qty"))
                 cur.chapterQty = value.toInt();
             else if (key == QLatin1String("chapterqtyps") && cur.chapterQty <= 0)
                 cur.chapterQty = value.toInt();
@@ -241,6 +273,263 @@ static IniData parseIni(const QString &iniPath)
         ini.books.append(cur);
 
     return ini;
+}
+
+static QStringList standardBibleBookFiles()
+{
+    return QStringList{
+        QStringLiteral("Gen"), QStringLiteral("Ex"), QStringLiteral("Lev"), QStringLiteral("Num"),
+        QStringLiteral("Deu"), QStringLiteral("Josh"), QStringLiteral("Judg"), QStringLiteral("Ruth"),
+        QStringLiteral("1Sam"), QStringLiteral("2Sam"), QStringLiteral("1Kin"), QStringLiteral("2Kin"),
+        QStringLiteral("1Chr"), QStringLiteral("2Chr"), QStringLiteral("Ezra"), QStringLiteral("Neh"),
+        QStringLiteral("Esth"), QStringLiteral("Job"), QStringLiteral("Ps"), QStringLiteral("Prov"),
+        QStringLiteral("Eccl"), QStringLiteral("Song"), QStringLiteral("Isa"), QStringLiteral("Jer"),
+        QStringLiteral("Lam"), QStringLiteral("Ezek"), QStringLiteral("Dan"), QStringLiteral("Hos"),
+        QStringLiteral("Joel"), QStringLiteral("Amos"), QStringLiteral("Obad"), QStringLiteral("Jonah"),
+        QStringLiteral("Mic"), QStringLiteral("Nah"), QStringLiteral("Hab"), QStringLiteral("Zeph"),
+        QStringLiteral("Hag"), QStringLiteral("Zech"), QStringLiteral("Mal"),
+        QStringLiteral("Matt"), QStringLiteral("Mark"), QStringLiteral("Luke"), QStringLiteral("John"),
+        QStringLiteral("Acts"), QStringLiteral("Rom"), QStringLiteral("1Cor"), QStringLiteral("2Cor"),
+        QStringLiteral("Gal"), QStringLiteral("Eph"), QStringLiteral("Phil"), QStringLiteral("Col"),
+        QStringLiteral("1Thes"), QStringLiteral("2Thes"), QStringLiteral("1Tim"), QStringLiteral("2Tim"),
+        QStringLiteral("Titus"), QStringLiteral("Phlm"), QStringLiteral("Heb"), QStringLiteral("James"),
+        QStringLiteral("1Pet"), QStringLiteral("2Pet"), QStringLiteral("1Jn"), QStringLiteral("2Jn"),
+        QStringLiteral("3Jn"), QStringLiteral("Jude"), QStringLiteral("Rev")
+    };
+}
+
+static QStringList standardBibleBookNamesRu()
+{
+    return QStringList{
+        QString::fromUtf8("Бытие"), QString::fromUtf8("Исход"), QString::fromUtf8("Левит"),
+        QString::fromUtf8("Числа"), QString::fromUtf8("Второзаконие"), QString::fromUtf8("Иисус Навин"),
+        QString::fromUtf8("Судей"), QString::fromUtf8("Руфь"), QString::fromUtf8("1 Царств"),
+        QString::fromUtf8("2 Царств"), QString::fromUtf8("3 Царств"), QString::fromUtf8("4 Царств"),
+        QString::fromUtf8("1 Паралипоменон"), QString::fromUtf8("2 Паралипоменон"),
+        QString::fromUtf8("Ездра"), QString::fromUtf8("Неемия"), QString::fromUtf8("Есфирь"),
+        QString::fromUtf8("Иов"), QString::fromUtf8("Псалтирь"), QString::fromUtf8("Притчи"),
+        QString::fromUtf8("Екклесиаст"), QString::fromUtf8("Песнь Песней"), QString::fromUtf8("Исаия"),
+        QString::fromUtf8("Иеремия"), QString::fromUtf8("Плач Иеремии"), QString::fromUtf8("Иезекииль"),
+        QString::fromUtf8("Даниил"), QString::fromUtf8("Осия"), QString::fromUtf8("Иоиль"),
+        QString::fromUtf8("Амос"), QString::fromUtf8("Авдий"), QString::fromUtf8("Иона"),
+        QString::fromUtf8("Михей"), QString::fromUtf8("Наум"), QString::fromUtf8("Аввакум"),
+        QString::fromUtf8("Софония"), QString::fromUtf8("Аггей"), QString::fromUtf8("Захария"),
+        QString::fromUtf8("Малахия"),
+        QString::fromUtf8("От Матфея"), QString::fromUtf8("От Марка"), QString::fromUtf8("От Луки"),
+        QString::fromUtf8("От Иоанна"), QString::fromUtf8("Деяния"), QString::fromUtf8("К Римлянам"),
+        QString::fromUtf8("1 Коринфянам"), QString::fromUtf8("2 Коринфянам"),
+        QString::fromUtf8("К Галатам"), QString::fromUtf8("К Ефесянам"),
+        QString::fromUtf8("К Филиппийцам"), QString::fromUtf8("К Колоссянам"),
+        QString::fromUtf8("1 Фессалоникийцам"), QString::fromUtf8("2 Фессалоникийцам"),
+        QString::fromUtf8("1 Тимофею"), QString::fromUtf8("2 Тимофею"),
+        QString::fromUtf8("К Титу"), QString::fromUtf8("К Филимону"),
+        QString::fromUtf8("К Евреям"), QString::fromUtf8("Иакова"),
+        QString::fromUtf8("1 Петра"), QString::fromUtf8("2 Петра"),
+        QString::fromUtf8("1 Иоанна"), QString::fromUtf8("2 Иоанна"),
+        QString::fromUtf8("3 Иоанна"), QString::fromUtf8("Иуды"),
+        QString::fromUtf8("Откровение")
+    };
+}
+
+static int guessBookIndexFromStem(QString stemLow)
+{
+    stemLow = stemLow.toLower().trimmed();
+    stemLow.replace(QString::fromUtf8("ё"), QString::fromUtf8("е"));
+    // убрать префиксы 54_ 54- 54.
+    stemLow.replace(QRegularExpression(QStringLiteral("^\\d+[._\\-\\s]+")), QString());
+    stemLow.replace(QRegularExpression(QStringLiteral("[\\s_\\-]+")), QString());
+
+    struct Pair { const char *key; int idx; };
+    static const Pair table[] = {
+        {"gen",0},{"ge",0},{"бытие",0},{"быт",0},
+        {"ex",1},{"exo",1},{"exod",1},{"исход",1},{"исх",1},
+        {"lev",2},{"le",2},{"левит",2},{"лев",2},
+        {"num",3},{"nu",3},{"числа",3},{"чис",3},
+        {"deu",4},{"dt",4},{"deut",4},{"второзаконие",4},{"втор",4},
+        {"josh",5},{"jos",5},{"навин",5},{"исуснавин",5},{"нав",5},
+        {"judg",6},{"jdg",6},{"судей",6},{"суд",6},
+        {"ruth",7},{"ru",7},{"руфь",7},{"руф",7},
+        {"1sam",8},{"1sa",8},{"1царств",8},{"1цар",8},{"1ц",8},
+        {"2sam",9},{"2sa",9},{"2царств",9},{"2цар",9},{"2ц",9},
+        {"1kin",10},{"1ki",10},{"1kings",10},{"3царств",10},{"3цар",10},{"3ц",10},
+        {"2kin",11},{"2ki",11},{"2kings",11},{"4царств",11},{"4цар",11},{"4ц",11},
+        {"1chr",12},{"1ch",12},{"1пар",12},{"1паралипоменон",12},
+        {"2chr",13},{"2ch",13},{"2пар",13},{"2паралипоменон",13},
+        {"ezra",14},{"ezr",14},{"ездра",14},{"езд",14},
+        {"neh",15},{"ne",15},{"неемия",15},{"неем",15},
+        {"esth",16},{"es",16},{"est",16},{"есфирь",16},{"есф",16},
+        {"job",17},{"иов",17},
+        {"ps",18},{"psa",18},{"psalm",18},{"псалтирь",18},{"псалом",18},{"пс",18},
+        {"prov",19},{"pr",19},{"притчи",19},{"прит",19},
+        {"eccl",20},{"ecc",20},{"екклесиаст",20},{"еккл",20},
+        {"song",21},{"so",21},{"ss",21},{"песнь",21},{"песн",21},{"пп",21},
+        {"isa",22},{"is",22},{"исаия",22},{"ис",22},
+        {"jer",23},{"иеремия",23},{"иер",23},
+        {"lam",24},{"la",24},{"плач",24},{"плачтеремии",24},
+        {"ezek",25},{"eze",25},{"иезекииль",25},{"иез",25},
+        {"dan",26},{"da",26},{"даниил",26},{"дан",26},
+        {"hos",27},{"ho",27},{"осия",27},{"ос",27},
+        {"joel",28},{"joe",28},{"иоиль",28},{"иоил",28},
+        {"amos",29},{"am",29},{"амос",29},{"ам",29},
+        {"obad",30},{"ob",30},{"авдий",30},{"авд",30},
+        {"jonah",31},{"jon",31},{"иона",31},
+        {"mic",32},{"михей",32},{"мих",32},
+        {"nah",33},{"na",33},{"наум",33},
+        {"hab",34},{"аввакум",34},{"авв",34},
+        {"zeph",35},{"zep",35},{"софония",35},{"соф",35},
+        {"hag",36},{"аггей",36},{"агг",36},
+        {"zech",37},{"zec",37},{"захария",37},{"зах",37},
+        {"mal",38},{"малахия",38},{"мал",38},
+        {"matt",39},{"mat",39},{"mt",39},{"матфея",39},{"матф",39},{"мф",39},
+        {"mark",40},{"mrk",40},{"mk",40},{"марка",40},{"мар",40},{"мк",40},
+        {"luke",41},{"luk",41},{"lk",41},{"луки",41},{"лук",41},{"лк",41},
+        {"john",42},{"joh",42},{"jn",42},{"иоанна",42},{"ин",42},
+        {"acts",43},{"act",43},{"ac",43},{"деяния",43},{"деян",43},{"деян",43},
+        {"rom",44},{"ro",44},{"римлянам",44},{"рим",44},{"римл",44},
+        {"1cor",45},{"1co",45},{"1коринфянам",45},{"1кор",45},
+        {"2cor",46},{"2co",46},{"2коринфянам",46},{"2кор",46},
+        {"gal",47},{"ga",47},{"галатам",47},{"гал",47},
+        {"eph",48},{"ефесянам",48},{"еф",48},
+        {"phil",49},{"php",49},{"php",49},{"филиппийцам",49},{"флп",49},{"фил",49},
+        {"col",50},{"колоссянам",50},{"кол",50},
+        {"1thes",51},{"1th",51},{"1thess",51},{"1фессалоникийцам",51},{"1фес",51},{"1фесс",51},
+        {"2thes",52},{"2th",52},{"2thess",52},{"2фессалоникийцам",52},{"2фес",52},{"2фесс",52},
+        {"1tim",53},{"1ti",53},{"1timothy",53},{"1тимофею",53},{"1тим",53},{"1тимофей",53},
+        {"2tim",54},{"2ti",54},{"2timothy",54},{"2тимофею",54},{"2тим",54},{"2тимофей",54},
+        {"titus",55},{"tit",55},{"tt",55},{"титу",55},{"тит",55},
+        {"phlm",56},{"phm",56},{"philemon",56},{"филимону",56},{"флм",56},{"филимон",56},
+        {"heb",57},{"hebrews",57},{"евреям",57},{"евр",57},
+        {"james",58},{"jas",58},{"jam",58},{"иакова",58},{"иак",58},{"як",58},
+        {"1pet",59},{"1pe",59},{"1peter",59},{"1петра",59},{"1пет",59},
+        {"2pet",60},{"2pe",60},{"2peter",60},{"2петра",60},{"2пет",60},
+        {"1jn",61},{"1jo",61},{"1john",61},{"1иоанна",61},{"1ин",61},{"1иоан",61},
+        {"2jn",62},{"2jo",62},{"2john",62},{"2иоанна",62},{"2ин",62},
+        {"3jn",63},{"3jo",63},{"3john",63},{"3иоанна",63},{"3ин",63},
+        {"jude",64},{"jud",64},{"иуды",64},{"иуд",64},
+        {"rev",65},{"re",65},{"revelation",65},{"apoc",65},{"откровение",65},{"откр",65},{"апок",65},
+        {nullptr, -1}
+    };
+    for (int i = 0; table[i].key; ++i) {
+        if (stemLow == QLatin1String(table[i].key)
+            || stemLow.startsWith(QLatin1String(table[i].key)))
+            return table[i].idx;
+    }
+    // содержит ключ
+    for (int i = 0; table[i].key; ++i) {
+        if (stemLow.contains(QLatin1String(table[i].key)))
+            return table[i].idx;
+    }
+    return -1;
+}
+
+/** Если в INI оборвался список книг — добираем ВСЕ HTML-файлы модуля */
+static void completeBooksFromDirectory(const QString &moduleRoot, IniData &ini)
+{
+    if (moduleRoot.isEmpty())
+        return;
+
+    QSet<QString> usedFiles; // lowercase absolute paths and stems already in INI
+    QSet<QString> usedStems;
+    for (const IniBook &b : ini.books) {
+        QString rel = b.pathName;
+        rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        const QFileInfo fi(rel);
+        usedStems.insert(fi.completeBaseName().toLower());
+        usedStems.insert(fi.fileName().toLower());
+        const QString abs = locateBookFile(moduleRoot, b.pathName);
+        if (!abs.isEmpty())
+            usedFiles.insert(QFileInfo(abs).absoluteFilePath().toLower());
+    }
+
+    const QStringList names = standardBibleBookNamesRu();
+    const QStringList stems = standardBibleBookFiles();
+
+    struct Found { int index; QString absPath; QString stem; };
+    QVector<Found> found;
+
+    QDirIterator it(moduleRoot, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString p = it.next();
+        const QFileInfo fi(p);
+        const QString ext = fi.suffix().toLower();
+        if (ext != QLatin1String("htm") && ext != QLatin1String("html")
+            && ext != QLatin1String("txt") && ext != QLatin1String("xhtml"))
+            continue;
+
+        const QString absLow = fi.absoluteFilePath().toLower();
+        if (usedFiles.contains(absLow))
+            continue;
+
+        const QString stem = fi.completeBaseName();
+        const QString stemLow = stem.toLower();
+        if (usedStems.contains(stemLow) || usedStems.contains(fi.fileName().toLower()))
+            continue;
+
+        // служебные
+        if (stemLow.contains(QStringLiteral("copyright")) || stemLow == QStringLiteral("index")
+            || stemLow == QStringLiteral("contents") || stemLow.startsWith(QStringLiteral("bibleqt"))
+            || stemLow.contains(QStringLiteral("comment")) || stemLow == QStringLiteral("readme")
+            || stemLow.contains(QStringLiteral("content")))
+            continue;
+
+        int idx = guessBookIndexFromStem(stemLow);
+        found.append({idx, fi.absoluteFilePath(), stem});
+    }
+
+    if (found.isEmpty())
+        return;
+
+    // Сначала известные по индексу, потом неизвестные (index < 0)
+    std::stable_sort(found.begin(), found.end(), [](const Found &a, const Found &b) {
+        if (a.index < 0 && b.index < 0)
+            return a.stem.toLower() < b.stem.toLower();
+        if (a.index < 0)
+            return false;
+        if (b.index < 0)
+            return true;
+        return a.index < b.index;
+    });
+
+    QSet<int> takenIndex;
+    for (const IniBook &b : ini.books) {
+        int g = guessBookIndexFromStem(QFileInfo(b.pathName).completeBaseName());
+        if (g < 0 && !b.fullName.isEmpty())
+            g = guessBookIndexFromStem(b.fullName);
+        if (g >= 0)
+            takenIndex.insert(g);
+    }
+
+    int added = 0;
+    for (const Found &fnd : found) {
+        if (fnd.index >= 0 && takenIndex.contains(fnd.index))
+            continue;
+
+        IniBook b;
+        QString rel = fnd.absPath;
+        const QString rootAbs = QDir(moduleRoot).absolutePath();
+        if (rel.startsWith(rootAbs)) {
+            rel = rel.mid(rootAbs.size());
+            while (rel.startsWith(QLatin1Char('/')) || rel.startsWith(QLatin1Char('\\')))
+                rel = rel.mid(1);
+        }
+        b.pathName = rel;
+        if (fnd.index >= 0 && fnd.index < names.size()) {
+            b.fullName = names.at(fnd.index);
+            b.shortName = stems.value(fnd.index, fnd.stem);
+            takenIndex.insert(fnd.index);
+        } else {
+            b.fullName = fnd.stem;
+            b.shortName = fnd.stem;
+        }
+        b.chapterQty = 1;
+        ini.books.append(b);
+        usedStems.insert(fnd.stem.toLower());
+        ++added;
+    }
+
+    if (added > 0)
+        qInfo("BibleQuote: добрано книг из папки модуля: %d (всего теперь %d)",
+              added, ini.books.size());
 }
 
 static QString detectModuleType(const IniData &ini)
@@ -1808,7 +2097,8 @@ ConversionResult Converter::analyze(const QString &bibleQuoteModulePath) const
         return result;
     }
 
-    const IniData ini = parseIni(iniPath);
+    IniData ini = parseIni(iniPath);
+    completeBooksFromDirectory(bibleQuoteModulePath, ini);
     result.success = true;
     result.detectedName = ini.get(QStringLiteral("biblename"),
                                   QFileInfo(bibleQuoteModulePath).fileName());
@@ -2217,6 +2507,25 @@ QString Converter::runPostConversionAudit(const QString &moduleDir, int expected
 //  Конвертация
 // ============================================================================
 
+
+static QString firstShortAlias(const QString &shortName, const QString &fullName, int bookId)
+{
+    QString s = shortName.trimmed();
+    if (!s.isEmpty()) {
+        // первое «слово» / аббревиатура до пробела
+        const int sp = s.indexOf(QLatin1Char(' '));
+        if (sp > 0)
+            s = s.left(sp).trimmed();
+        // убрать завершающую точку для компактности оставляем как есть
+        if (!s.isEmpty())
+            return s;
+    }
+    if (!fullName.trimmed().isEmpty())
+        return fullName.trimmed();
+    return QString::number(bookId);
+}
+
+
 ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const QString &outputDir)
 {
     ConversionResult result = analyze(bibleQuoteModulePath);
@@ -2224,7 +2533,8 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
         return result;
 
     const QString iniPath = findIniFile(bibleQuoteModulePath);
-    const IniData ini = parseIni(iniPath);
+    IniData ini = parseIni(iniPath);
+    completeBooksFromDirectory(bibleQuoteModulePath, ini);
     QString moduleType = detectModuleType(ini);
     if (ini.books.isEmpty() && hasDictionaryIdxFiles(bibleQuoteModulePath))
         moduleType = QStringLiteral("dictionary");
@@ -2316,6 +2626,32 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
         }
 
         if (!dictionaryDone) {
+        // Фаза 1: сразу регистрируем ВСЕ книги из INI (чтобы список не обрывался)
+        const int bookQtyIni = ini.get(QStringLiteral("bookqty")).toInt();
+        QVector<int> chapterHints;
+        chapterHints.resize(ini.books.size());
+        for (int i = 0; i < ini.books.size(); ++i) {
+            const IniBook &book = ini.books[i];
+            const int bookId = i + 1;
+            const QString fullName = book.fullName.isEmpty()
+                                         ? QString::fromUtf8("Книга %1").arg(bookId)
+                                         : book.fullName;
+            const QString shortName = firstShortAlias(book.shortName, fullName, bookId);
+            int chHint = book.chapterQty > 0 ? book.chapterQty : 1;
+            chapterHints[i] = chHint;
+
+            insertBook.bindValue(0, bookId);
+            insertBook.bindValue(1, shortName);
+            insertBook.bindValue(2, fullName);
+            insertBook.bindValue(3, chHint);
+            if (!insertBook.exec()) {
+                qWarning() << "insert book failed" << bookId << fullName << insertBook.lastError();
+            }
+            convertedBookNames << fullName;
+            ++totalBooks;
+        }
+
+        // Фаза 2: разбираем HTML и пишем стихи
         for (int i = 0; i < ini.books.size(); ++i) {
             const IniBook &book = ini.books[i];
             const int bookId = i + 1;
@@ -2331,6 +2667,9 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
                               chaptersParsed, bookVerses, method);
                 if (!method.isEmpty())
                     parseMethods.insert(method);
+            } else {
+                qWarning() << "BibleQuote: файл книги не найден:" << book.pathName
+                           << book.fullName;
             }
 
             int actualMaxChapter = 0;
@@ -2350,31 +2689,34 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
 
             int chaptersForMeta = actualChapters > 0 ? actualChapters : actualMaxChapter;
             if (chaptersForMeta <= 0)
+                chaptersForMeta = chapterHints.value(i, 1);
+            if (chaptersForMeta <= 0)
                 chaptersForMeta = 1;
 
-            const QString fullName = book.fullName.isEmpty()
-                                         ? QString::fromUtf8("Книга %1").arg(bookId)
-                                         : book.fullName;
-            const QString shortName = book.shortName.isEmpty()
-                                          ? QString::number(bookId)
-                                          : book.shortName;
+            // обновить число глав
+            {
+                QSqlQuery uq(db);
+                uq.prepare(QStringLiteral("UPDATE books SET chapters = ? WHERE id = ?"));
+                uq.bindValue(0, chaptersForMeta);
+                uq.bindValue(1, bookId);
+                uq.exec();
+            }
 
-            insertBook.bindValue(0, bookId);
-            insertBook.bindValue(1, shortName);
-            insertBook.bindValue(2, fullName);
-            insertBook.bindValue(3, chaptersForMeta);
-            insertBook.exec();
-
-            ++totalBooks;
             totalVerses += bookVerses;
-            convertedBookNames << fullName;
 
-            emit progress(totalBooks, ini.books.size(),
+            const QString fullName = convertedBookNames.value(i, book.fullName);
+            emit progress(i + 1, ini.books.size(),
                           QString::fromUtf8("%1 (%2 гл., %3 ст.)")
                               .arg(fullName).arg(chaptersForMeta).arg(bookVerses));
             QCoreApplication::processEvents();
         }
+
+        if (bookQtyIni > 0 && totalBooks < bookQtyIni) {
+            qWarning() << "BibleQuote: BookQty=" << bookQtyIni
+                       << "но в INI распознано книг:" << totalBooks;
         }
+        }
+
 
         if (totalVerses == 0) {
             insertBook.bindValue(0, 1);
@@ -2401,6 +2743,11 @@ ConversionResult Converter::convert(const QString &bibleQuoteModulePath, const Q
 
     meta[QStringLiteral("books_expected")] = expectedBooks;
     meta[QStringLiteral("books_converted")] = totalBooks;
+    {
+        QJsonArray arr;
+        for (const QString &n : convertedBookNames) arr.append(n);
+        meta[QStringLiteral("book_names")] = arr;
+    }
     meta[QStringLiteral("verses_converted")] = totalVerses;
 
     QFile metaFile(outputDir + QStringLiteral("/module.json"));

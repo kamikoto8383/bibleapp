@@ -88,6 +88,7 @@ static QString normalizeBookKey(QString s)
     s.remove(QLatin1Char(')'));
     const QStringList strip = {
         QString::fromUtf8("книга "), QString::fromUtf8("книги "),
+        QString::fromUtf8("евангелие от "), QString::fromUtf8("евангелие "),
         QString::fromUtf8("от "), QString::fromUtf8("св "),
         QString::fromUtf8("святого "), QString::fromUtf8("пророка "),
         QString::fromUtf8("апостола "),
@@ -154,7 +155,7 @@ static QString canonicalBookKey(const QString &shortName, const QString &fullNam
         {"мк", "марка"}, {"марка", "марка"}, {"марк", "марка"}, {"от марка", "марка"},
         {"лк", "луки"}, {"луки", "луки"}, {"лука", "луки"}, {"от луки", "луки"},
         // Евангелие от Иоанна — отдельный ключ от 1/2/3 Иоанна
-        {"ин", "от иоанна"}, {"от иоанна", "от иоанна"}, {"евангелие от иоанна", "от иоанна"},
+        {"ин", "иоанна"}, {"от иоанна", "иоанна"}, {"евангелие от иоанна", "иоанна"}, {"иоанна", "иоанна"},
         {"деян", "деяния"}, {"деяния", "деяния"},
         {"рим", "римлянам"}, {"римлянам", "римлянам"},
         {"1 кор", "1 коринфянам"}, {"1кор", "1 коринфянам"},
@@ -215,9 +216,9 @@ static QString canonicalBookKey(const QString &shortName, const QString &fullNam
                 return QString::fromUtf8(al.canon);
         }
 
-        // 3) Голое «иоанна» без цифры в начале = Евангелие
+        // 3) Голое «иоанна» без цифры в начале = Евангелие (не 1/2/3 Иоанна)
         if (key == QString::fromUtf8("иоанна"))
-            return QString::fromUtf8("от иоанна");
+            return QString::fromUtf8("иоанна");
 
         return key;
     };
@@ -249,28 +250,29 @@ int Module::findBookIdMatching(const Module *other, int otherBookId) const
         return -1;
 
     QString shortN, fullN;
+    int otherIndex = -1;
+    int i = 0;
     for (const auto &b : other->books()) {
         if (b.id == otherBookId) {
             shortN = b.shortName;
             fullN = b.fullName;
+            otherIndex = i;
             break;
         }
+        ++i;
     }
     if (shortN.isEmpty() && fullN.isEmpty())
         return -1;
 
     const QString want = canonicalBookKey(shortN, fullN);
-    if (want.isEmpty())
-        return -1;
-
-    // Только точное каноническое совпадение
-    for (const auto &b : m_books) {
-        const QString got = canonicalBookKey(b.shortName, b.fullName);
-        if (got == want)
-            return b.id;
+    if (!want.isEmpty()) {
+        for (const auto &b : m_books) {
+            const QString got = canonicalBookKey(b.shortName, b.fullName);
+            if (got == want)
+                return b.id;
+        }
     }
 
-    // Точное совпадение нормализованных имён (без contains)
     const QString wShort = normalizeBookKey(shortN);
     const QString wFull = normalizeBookKey(fullN);
     for (const auto &b : m_books) {
@@ -280,6 +282,16 @@ int Module::findBookIdMatching(const Module *other, int otherBookId) const
             || (!wFull.isEmpty() && (bs == wFull || bf == wFull)))
             return b.id;
     }
+
+    // Тот же числовой id
+    for (const auto &b : m_books) {
+        if (b.id == otherBookId)
+            return b.id;
+    }
+
+    // Тот же порядковый номер книги в списке модуля
+    if (otherIndex >= 0 && otherIndex < m_books.size())
+        return m_books.at(otherIndex).id;
 
     return -1;
 }
@@ -483,31 +495,263 @@ static QString translateGreekWord(const QString &word)
     return QString::fromUtf8("—");
 }
 
+static bool isGreekToken(const QString &s)
+{
+    if (s.isEmpty())
+        return false;
+    int letters = 0, greek = 0;
+    for (QChar c : s) {
+        if (c.isLetter()) {
+            ++letters;
+            const uint u = c.unicode();
+            // Greek and Coptic, Greek Extended
+            if ((u >= 0x0370 && u <= 0x03FF) || (u >= 0x1F00 && u <= 0x1FFF))
+                ++greek;
+        }
+    }
+    return letters > 0 && greek * 2 >= letters; // большинство букв — греческие
+}
+
+static bool isHebrewToken(const QString &s)
+{
+    if (s.isEmpty())
+        return false;
+    int letters = 0, heb = 0;
+    for (QChar c : s) {
+        if (c.isLetter()) {
+            ++letters;
+            const uint u = c.unicode();
+            if (u >= 0x0590 && u <= 0x05FF)
+                ++heb;
+        }
+    }
+    return letters > 0 && heb * 2 >= letters;
+}
+
+static bool isCyrillicToken(const QString &s)
+{
+    if (s.isEmpty())
+        return false;
+    int letters = 0, cyr = 0;
+    for (QChar c : s) {
+        if (c.isLetter()) {
+            ++letters;
+            const uint u = c.unicode();
+            if ((u >= 0x0400 && u <= 0x04FF) || (u >= 0x0500 && u <= 0x052F))
+                ++cyr;
+        }
+    }
+    return letters > 0 && cyr * 2 >= letters;
+}
+
+static bool isStrongNumToken(const QString &s)
+{
+    if (s.isEmpty())
+        return false;
+    QString t = s.trimmed();
+    // 976  G976  H7225  2424a
+    int i = 0;
+    if (t.size() >= 2 && (t[0] == QLatin1Char('G') || t[0] == QLatin1Char('g')
+                          || t[0] == QLatin1Char('H') || t[0] == QLatin1Char('h')))
+        i = 1;
+    if (i >= t.size() || !t[i].isDigit())
+        return false;
+    int digits = 0;
+    while (i < t.size() && t[i].isDigit()) {
+        ++digits;
+        ++i;
+    }
+    if (digits < 1 || digits > 5)
+        return false;
+    // суффикс a/b
+    if (i < t.size()) {
+        if (t.size() - i > 1)
+            return false;
+        const QChar c = t[i].toLower();
+        if (c != QLatin1Char('a') && c != QLatin1Char('b'))
+            return false;
+    }
+    return true;
+}
+
+static bool isMorphToken(const QString &s)
+{
+    if (s.isEmpty() || s.size() > 16)
+        return false;
+    // N-NSF, V-AAI-3S, CONJ, PREP, T-ASM, P-GSM, ADV, PRT ...
+    bool hasLetter = false, hasDigit = false, hasHyphen = false;
+    for (QChar c : s) {
+        if (c.isLetter())
+            hasLetter = true;
+        else if (c.isDigit())
+            hasDigit = true;
+        else if (c == QLatin1Char('-') || c == QLatin1Char('/'))
+            hasHyphen = true;
+        else
+            return false;
+    }
+    if (!hasLetter)
+        return false;
+    // CONJ PREP ADV без дефиса
+    const QString u = s.toUpper();
+    if (u == QLatin1String("CONJ") || u == QLatin1String("PREP")
+        || u == QLatin1String("ADV") || u == QLatin1String("PRT")
+        || u == QLatin1String("COND") || u == QLatin1String("INJ")
+        || u == QLatin1String("ARAM") || u == QLatin1String("HEB")
+        || u == QLatin1String("N-PRI") || u == QLatin1String("N-LI")
+        || u == QLatin1String("N-OI"))
+        return true;
+    // Коды вида X-YYY или V-AAI-3S
+    return hasHyphen;
+}
+
+static bool looksLikePlainInterlinear(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    // Уже размеченный формат
+    if (text.contains(QChar(0x00A6)) || text.contains(QLatin1Char('|')))
+        return true;
+    const QStringList parts = text.split(QRegularExpression(QStringLiteral("\\s+")),
+                                         Qt::SkipEmptyParts);
+    if (parts.size() < 6)
+        return false;
+    int greek = 0, cyr = 0, strongs = 0, morphs = 0;
+    for (const QString &p : parts) {
+        if (isGreekToken(p) || isHebrewToken(p))
+            ++greek;
+        else if (isCyrillicToken(p))
+            ++cyr;
+        else if (isStrongNumToken(p))
+            ++strongs;
+        else if (isMorphToken(p))
+            ++morphs;
+    }
+    // Типичный подстрочник: много греч./ивр. + переводы + стронги
+    return greek >= 3 && (cyr >= 2 || strongs >= 2) && (strongs + morphs) >= 2;
+}
+
+static QString makeInterlinearChip(const QString &orig, const QString &gloss,
+                                   const QString &strong, const QString &morph)
+{
+    QString strongFull = strong.trimmed().toUpper();
+    if (!strongFull.isEmpty() && strongFull[0].isDigit())
+        strongFull.prepend(QLatin1Char('G')); // НЗ по умолчанию
+
+    QUrl href;
+    href.setScheme(QStringLiteral("w"));
+    href.setPath(QStringLiteral("/"));
+    QUrlQuery uq;
+    uq.addQueryItem(QStringLiteral("g"), orig);
+    if (!gloss.isEmpty())
+        uq.addQueryItem(QStringLiteral("m"), gloss);
+    if (!strongFull.isEmpty())
+        uq.addQueryItem(QStringLiteral("s"), strongFull);
+    if (!morph.isEmpty())
+        uq.addQueryItem(QStringLiteral("morph"), morph);
+    href.setQuery(uq);
+
+    QString title = strongFull;
+    if (!gloss.isEmpty())
+        title = title.isEmpty() ? gloss : (title + QStringLiteral(" — ") + gloss);
+    if (!morph.isEmpty())
+        title += QStringLiteral(" [") + morph + QLatin1Char(']');
+
+    const QString top = gloss.isEmpty()
+                            ? (morph.isEmpty() ? QStringLiteral("&nbsp;") : morph.toHtmlEscaped())
+                            : gloss.toHtmlEscaped();
+    const QString bottom = strongFull.isEmpty()
+                               ? (morph.isEmpty() ? QString() : morph.toHtmlEscaped())
+                               : strongFull.toHtmlEscaped();
+
+    const QString hrefStr = QStringLiteral("w://word?g=%1&m=%2&s=%3&morph=%4")
+                                .arg(QString::fromUtf8(QUrl::toPercentEncoding(orig)),
+                                     QString::fromUtf8(QUrl::toPercentEncoding(gloss)),
+                                     QString::fromUtf8(QUrl::toPercentEncoding(strongFull)),
+                                     QString::fromUtf8(QUrl::toPercentEncoding(morph)));
+
+    return QStringLiteral(
+               "<span style=\"display:inline-block; text-align:center; margin:0 7px 10px 0; "
+               "vertical-align:top; max-width:9em;\">"
+               "<a href=\"%1\" title=\"%2\" style=\"color:#2d6a4f; text-decoration:none; cursor:pointer;\">"
+               "<span style=\"display:block; font-size:11px; color:#5a4a3a; line-height:1.2;\">%3</span>"
+               "<span style=\"display:block; font-size:16px; line-height:1.35; color:#1a120a; "
+               "border-bottom:1px dotted #8a7a60;\">%4</span>"
+               "<span style=\"display:block; font-size:10px; color:#887; line-height:1.15;\">%5</span>"
+               "</a></span>")
+        .arg(hrefStr.toHtmlEscaped(),
+             title.toHtmlEscaped(),
+             top,
+             orig.toHtmlEscaped(),
+             bottom);
+}
+
+static QString annotatePlainInterlinear(const QString &text)
+{
+    const QStringList parts = text.split(QRegularExpression(QStringLiteral("\\s+")),
+                                         Qt::SkipEmptyParts);
+    QStringList out;
+    int i = 0;
+    const int n = parts.size();
+    while (i < n) {
+        const QString &tok = parts.at(i);
+        if (isGreekToken(tok) || isHebrewToken(tok)) {
+            const QString orig = tok;
+            ++i;
+            QStringList glossParts;
+            while (i < n && isCyrillicToken(parts.at(i))) {
+                glossParts << parts.at(i);
+                ++i;
+            }
+            QString strong;
+            if (i < n && isStrongNumToken(parts.at(i))) {
+                strong = parts.at(i);
+                ++i;
+            }
+            QString morph;
+            if (i < n && isMorphToken(parts.at(i))) {
+                morph = parts.at(i);
+                ++i;
+            }
+            // если стронга нет, но морфология похожа на число — уже обработано
+            out << makeInterlinearChip(orig, glossParts.join(QLatin1Char(' ')), strong, morph);
+        } else {
+            // пунктуация / мусор — пропускаем или показываем мелко
+            if (!isStrongNumToken(tok) && !isMorphToken(tok) && !isCyrillicToken(tok))
+                out << QStringLiteral("<span style=\"color:#999; font-size:11px;\">%1</span> ")
+                           .arg(tok.toHtmlEscaped());
+            ++i;
+        }
+    }
+    return out.join(QString());
+}
+
 static QString annotateGreek(const QString &greek)
 {
     // Формат подстрочника: ORIG¦GLOSS¦STRONG  (слова через пробел)
-    QStringList parts = greek.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    QStringList parts = greek.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     QStringList out;
-    bool interlinear = false;
+    bool pipeInterlinear = false;
     for (const QString &p : parts) {
         if (p.contains(QChar(0x00A6)) || p.contains(QLatin1Char('|'))) {
-            interlinear = true;
+            pipeInterlinear = true;
             break;
         }
     }
 
-    if (interlinear) {
+    if (pipeInterlinear) {
         for (const QString &rawPart : parts) {
             QStringList fields = rawPart.split(QChar(0x00A6));
             if (fields.size() < 2)
                 fields = rawPart.split(QLatin1Char('|'));
             if (fields.size() < 2) {
-                out << rawPart.toHtmlEscaped() + " ";
+                out << rawPart.toHtmlEscaped() + QLatin1Char(' ');
                 continue;
             }
             QString orig = fields.value(0).trimmed();
             QString gloss = fields.value(1).trimmed();
             QString strong = fields.value(2).trimmed().toUpper();
+            QString morph = fields.value(3).trimmed();
 
             if (gloss.isEmpty() && !strong.isEmpty())
                 gloss = Module::lookupStrongGloss(strong);
@@ -516,35 +760,16 @@ static QString annotateGreek(const QString &greek)
                 if (gloss == QString::fromUtf8("—"))
                     gloss.clear();
             }
-
-            QUrl href;
-            href.setScheme(QStringLiteral("w"));
-            href.setPath(QStringLiteral("/"));
-            QUrlQuery uq;
-            uq.addQueryItem(QStringLiteral("g"), orig);
-            if (!gloss.isEmpty())
-                uq.addQueryItem(QStringLiteral("m"), gloss);
-            if (!strong.isEmpty())
-                uq.addQueryItem(QStringLiteral("s"), strong);
-            href.setQuery(uq);
-
-            QString title = strong.isEmpty() ? gloss : (strong + " — " + gloss);
-            out << QString(
-                "<span style=\"display:inline-block; text-align:center; margin:0 6px 8px 0; vertical-align:top;\">"
-                "<a href=\"%1\" title=\"%2\" style=\"color:#2d6a4f; text-decoration:none;\">"
-                "<span style=\"display:block; font-size:11px; color:#5a4a3a; line-height:1.2;\">%3</span>"
-                "<span style=\"display:block; font-size:16px; line-height:1.3;\">%4</span>"
-                "<span style=\"display:block; font-size:10px; color:#887; line-height:1.1;\">%5</span>"
-                "</a></span>"
-            ).arg(href.toString(QUrl::FullyEncoded),
-                  title.toHtmlEscaped(),
-                  gloss.isEmpty() ? QString::fromUtf8("—") : gloss.toHtmlEscaped(),
-                  orig.toHtmlEscaped(),
-                  strong.toHtmlEscaped());
+            out << makeInterlinearChip(orig, gloss, strong, morph);
         }
-        return out.join("");
+        return out.join(QString());
     }
 
+    // Сплошной текст: «Βίβλος Книга 976 N-NSF γενέσεως происхождения 1078 N-GSF …»
+    if (looksLikePlainInterlinear(greek))
+        return annotatePlainInterlinear(greek);
+
+    // Простой греческий текст — кликабельные слова со словарём
     for (const QString &rawPart : parts) {
         QString part = rawPart;
         QString trail;
@@ -558,33 +783,17 @@ static QString annotateGreek(const QString &greek)
             part = part.mid(1);
         }
         if (part.isEmpty()) {
-            out << rawPart.toHtmlEscaped() + " ";
+            out << rawPart.toHtmlEscaped() + QLatin1Char(' ');
             continue;
         }
         QString meaning = translateGreekWord(part);
         if (meaning == QString::fromUtf8("—"))
             meaning.clear();
-        QUrl href;
-        href.setScheme(QStringLiteral("w"));
-        href.setPath(QStringLiteral("/"));
-        QUrlQuery uq;
-        uq.addQueryItem(QStringLiteral("g"), part);
-        if (!meaning.isEmpty())
-            uq.addQueryItem(QStringLiteral("m"), meaning);
-        href.setQuery(uq);
-        QString safe = part.toHtmlEscaped();
-        QString glossHtml = meaning.isEmpty()
-            ? QString("<span style=\"color:#aaa; font-size:small;\"> —</span>")
-            : QString("<span style=\"color:#555; font-size:small;\"> %1</span>").arg(meaning.toHtmlEscaped());
-        out << QString(
-            "%1<a href=\"%2\" title=\"%3\" style=\"color:#2d6a4f; text-decoration:none;\">"
-            "<span style=\"white-space:nowrap;\">%4%5</span></a>%6 "
-        ).arg(lead.toHtmlEscaped(),
-              href.toString(QUrl::FullyEncoded),
-              meaning.isEmpty() ? QString::fromUtf8("нет в словаре") : meaning.toHtmlEscaped(),
-              safe, glossHtml, trail.toHtmlEscaped());
+        out << makeInterlinearChip(part, meaning, QString(), QString());
+        if (!trail.isEmpty())
+            out << trail.toHtmlEscaped();
     }
-    return out.join("");
+    return out.join(QString());
 }
 
 static QString highlightSearchTerms(const QString &escapedText, const QString &query)
@@ -717,11 +926,31 @@ static QString sanitizeStoredVerseHtml(QString html)
     html.replace(reIOpen, QStringLiteral("<i>"));
     html.replace(reBOpen, QStringLiteral("<b>"));
 
-    // Оставляем только i/b/sup/sub/a/br
+    // Слова Иисуса (red letter) — inline color (QTextBrowser надежнее красит так)
+    static const QRegularExpression reWjOpen(
+        QStringLiteral("<span\\b[^>]*class\\s*=\\s*[\"']wj[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    html.replace(reWjOpen,
+                 QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"));
+
+    // Уже сохранённые inline red-letter
+    static const QRegularExpression reWjStyleOpen(
+        QStringLiteral("<span\\b[^>]*style\\s*=\\s*[\"'][^\"']*color\\s*:\\s*#?c62828[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    html.replace(reWjStyleOpen,
+                 QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"));
+
+    // Оставляем только i/b/sup/sub/a/br/span
     static const QRegularExpression reOther(
-        QStringLiteral("<(?!/?(?:i|b|sup|sub|a|br)\\b)[^>]*>"),
+        QStringLiteral("<(?!/?(?:i|b|sup|sub|a|br|span)\\b)[^>]*>"),
         QRegularExpression::CaseInsensitiveOption);
     html.replace(reOther, QStringLiteral(" "));
+
+    // Удаляем span без нашего red style
+    static const QRegularExpression reBadSpanOpen(
+        QStringLiteral("<span\\b(?![^>]*style\\s*=\\s*[\"'][^\"']*color\\s*:\\s*#?c62828)[^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    html.replace(reBadSpanOpen, QStringLiteral(""));
 
     static const QRegularExpression reEmptyI(
         QStringLiteral("<i>\\s*</i>"), QRegularExpression::CaseInsensitiveOption);
@@ -781,10 +1010,32 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
         if (text.trimmed().isEmpty() || text == QString(QChar(0x200B)))
             text.clear();
 
-        if (!text.isEmpty() && text.contains(QLatin1Char('<')))
-            text = sanitizeStoredVerseHtml(text);
-        else if (!text.isEmpty())
-            text = text.toHtmlEscaped();
+        if (!text.isEmpty()) {
+            QString working = text;
+            if (working.contains(QLatin1Char('<')))
+                working = sanitizeStoredVerseHtml(working);
+
+            QString stripped = working;
+            if (stripped.contains(QLatin1Char('<'))) {
+                static const QRegularExpression reTags(QStringLiteral("<[^>]+>"));
+                stripped.replace(reTags, QStringLiteral(" "));
+                static const QRegularExpression reWs(QStringLiteral("\\s+"));
+                stripped = stripped.replace(reWs, QStringLiteral(" ")).trimmed();
+            }
+
+            const QString typeLow = m_type.toLower();
+            const bool forceInterlinear =
+                typeLow.contains(QLatin1String("interlinear"))
+                || typeLow.contains(QString::fromUtf8("подстроч"))
+                || typeLow.contains(QLatin1String("interlin"));
+
+            if (forceInterlinear || looksLikePlainInterlinear(stripped))
+                text = annotateGreek(stripped);
+            else if (working.contains(QLatin1Char('<')))
+                text = working;
+            else
+                text = working.toHtmlEscaped();
+        }
 
         // Убираем ведущий номер стиха, если он остался в сохранённом тексте
         {
@@ -1206,6 +1457,7 @@ QString Module::lookupVerseStrongs(int book, int chapter, int verse)
         candidates << "/usr/share/bibleapp/verse_strongs.sqlite";
         candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/verse_strongs.sqlite";
         candidates << QCoreApplication::applicationDirPath() + "/verse_strongs.sqlite";
+        candidates << QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/verse_strongs.sqlite";
         QString path;
         for (const QString &p : candidates) {
             if (QFile::exists(p)) { path = p; break; }
@@ -1245,6 +1497,7 @@ static QSqlDatabase &strongsDb()
         candidates << "/usr/share/bibleapp/strongs_full.sqlite";
         candidates << QCoreApplication::applicationDirPath() + "/../share/bibleapp/strongs_full.sqlite";
         candidates << QCoreApplication::applicationDirPath() + "/strongs_full.sqlite";
+        candidates << QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/strongs_full.sqlite";
         // fallback: старый греческий лексикон
         candidates << "/usr/share/bibleapp/greek_lexicon.sqlite";
         QString path;
@@ -1283,12 +1536,35 @@ QString Module::lookupStrongGloss(const QString &strongNum)
     if (!db.isOpen()) return {};
     QString full = normalizeStrongNum(strongNum);
     QSqlQuery q(db);
-    // новая схема strongs_full
     q.prepare("SELECT gloss_ru, gloss_en FROM strongs WHERE num = ? LIMIT 1");
     q.addBindValue(full);
     if (q.exec() && q.next()) {
-        QString ru = q.value(0).toString();
-        if (!ru.isEmpty()) return ru;
+        QString ru = q.value(0).toString().trimmed();
+        if (!ru.isEmpty()) {
+            // убрать первую строку-лемму без кириллицы
+            QStringList lines = ru.split(QChar('\n'), Qt::SkipEmptyParts);
+            if (!lines.isEmpty()) {
+                bool hasCyr = false;
+                for (QChar ch : lines.first()) {
+                    const uint u = ch.unicode();
+                    if ((u >= 0x0400 && u <= 0x04FF) || ch == QChar(0x0451) || ch == QChar(0x0401)) {
+                        hasCyr = true;
+                        break;
+                    }
+                }
+                if (!hasCyr && lines.size() > 1)
+                    lines = lines.mid(1);
+            }
+            QString body = lines.join(QStringLiteral(" ")).simplified();
+            // короткая глосса — до первой точки с запятой или 120 символов
+            int cut = body.indexOf(QLatin1Char(';'));
+            if (cut > 8 && cut < 120)
+                body = body.left(cut).trimmed();
+            else if (body.size() > 120)
+                body = body.left(117) + QStringLiteral("...");
+            if (!body.isEmpty())
+                return body;
+        }
         return q.value(1).toString();
     }
     // fallback старый greek_lexicon
@@ -1320,25 +1596,74 @@ QString Module::lookupStrongArticle(const QString &strongNum)
     QString lemma = q.value(1).toString();
     QString en = q.value(2).toString();
     QString ru = q.value(3).toString();
-    QString defEn = q.value(4).toString();
-    QString deriv = q.value(5).toString();
+    // def_en / deriv — английские, пользователю не показываем
+
+    auto hasCyrillic = [](const QString &s) {
+        for (QChar ch : s) {
+            const uint u = ch.unicode();
+            if ((u >= 0x0400 && u <= 0x04FF) || ch == QChar(0x0451) || ch == QChar(0x0401))
+                return true;
+        }
+        return false;
+    };
+
+    // Из русской статьи: первая строка часто лемма (греч./евр.), остальное — перевод
+    QString lemmaRu;
+    QString bodyRu = ru.trimmed();
+    if (!bodyRu.isEmpty()) {
+        const QStringList lines = bodyRu.split(QChar('\n'), Qt::SkipEmptyParts);
+        if (!lines.isEmpty()) {
+            const QString first = lines.first().trimmed();
+            bool firstIsLemma = false;
+            for (QChar ch : first) {
+                const uint u = ch.unicode();
+                if ((u >= 0x0370 && u <= 0x03FF) || (u >= 0x1F00 && u <= 0x1FFF)
+                    || (u >= 0x0590 && u <= 0x05FF)) {
+                    firstIsLemma = true;
+                    break;
+                }
+            }
+            // если первая строка — только оригинал (мало кириллицы)
+            if (firstIsLemma && !hasCyrillic(first)) {
+                lemmaRu = first;
+                QStringList rest = lines.mid(1);
+                bodyRu = rest.join(QStringLiteral("\n")).trimmed();
+            }
+        }
+    }
 
     QString html;
-    html += QString::fromUtf8("<div style='line-height:1.35'>");
-    html += QString::fromUtf8("<b style='font-size:14px'>%1</b>").arg(num.toHtmlEscaped());
-    if (!lemma.isEmpty())
-        html += QString::fromUtf8(" · <i>%1</i>").arg(lemma.toHtmlEscaped());
-    if (!ru.isEmpty())
-        html += QString::fromUtf8("<br><b>По-русски:</b> %1").arg(ru.toHtmlEscaped());
-    if (!en.isEmpty())
-        html += QString::fromUtf8("<br><b>Кратко (EN):</b> %1").arg(en.toHtmlEscaped());
-    if (!deriv.isEmpty())
-        html += QString::fromUtf8("<br><span style='color:#666'><b>Происх.:</b> %1</span>").arg(deriv.toHtmlEscaped());
-    if (!defEn.isEmpty()) {
-        QString d = defEn;
-        if (d.length() > 700) d = d.left(700) + "...";
-        html += QString::fromUtf8("<br><span style='color:#333; font-size:12px'>%1</span>").arg(d.toHtmlEscaped());
+    html += QString::fromUtf8("<div style='line-height:1.45'>");
+    html += QString::fromUtf8("<div style='margin-bottom:6px;'>"
+                              "<b style='font-size:15px; color:#6b2c0d;'>%1</b>")
+                .arg(num.toHtmlEscaped());
+    if (!lemmaRu.isEmpty())
+        html += QString::fromUtf8(" · <span style='font-size:16px;'>%1</span>")
+                    .arg(lemmaRu.toHtmlEscaped());
+    html += QStringLiteral("</div>");
+
+    if (!bodyRu.isEmpty() && hasCyrillic(bodyRu)) {
+        QString pretty = bodyRu.toHtmlEscaped();
+        pretty.replace(QStringLiteral("\n"), QStringLiteral("<br>"));
+        html += QString::fromUtf8("<div style='font-size:14px; color:#1a120a;'>%1</div>")
+                    .arg(pretty);
+    } else if (hasCyrillic(ru)) {
+        QString pretty = ru.trimmed().toHtmlEscaped();
+        pretty.replace(QStringLiteral("\n"), QStringLiteral("<br>"));
+        html += QString::fromUtf8("<div style='font-size:14px;'>%1</div>").arg(pretty);
+    } else {
+        // Запасной вариант — только если русского совсем нет
+        QString fallback = !en.isEmpty() ? en : lemma;
+        if (!fallback.isEmpty()) {
+            html += QString::fromUtf8(
+                "<div style='color:#666; font-size:13px;'>"
+                "<i>Русская статья отсутствует.</i><br>%1</div>")
+                .arg(fallback.toHtmlEscaped());
+        } else {
+            html += QString::fromUtf8("<div style='color:#888;'>перевод не найден</div>");
+        }
     }
+
     html += QString::fromUtf8("</div>");
     return html;
 }

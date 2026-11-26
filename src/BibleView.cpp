@@ -28,6 +28,7 @@
 #include <QWheelEvent>
 #include <QPropertyAnimation>
 #include <QAbstractAnimation>
+#include <QGraphicsOpacityEffect>
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QLabel>
@@ -46,6 +47,7 @@
 #include <QAction>
 #include <QTextCursor>
 #include <QScrollBar>
+#include <QScreen>
 #include <QTextEdit>
 #include <QColor>
 #include <QHash>
@@ -95,6 +97,7 @@ static void savePanelState(BibleView *view)
 #include <QKeyEvent>
 #include <QTextCursor>
 #include <QScrollBar>
+#include <QScreen>
 #include <QTextEdit>
 #include <QColor>
 #include <QMessageBox>
@@ -124,21 +127,58 @@ public:
 protected:
     void showPopup() override
     {
+        // Больше видимых строк — длинный список книг Библии
+        if (maxVisibleItems() < 25)
+            setMaxVisibleItems(25);
+
         QComboBox::showPopup();
+
+        QAbstractItemView *v = view();
+        if (v) {
+            v->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            // убедиться, что можно доскроллить до последнего пункта
+            if (v->model() && v->model()->rowCount() > 0) {
+                // не прыгаем — только политика скролла
+            }
+        }
+
         QWidget *popup = this->findChild<QFrame *>();
         if (!popup) {
-            // Qt6: контейнер попапа — top-level окно view
-            QAbstractItemView *v = view();
             if (v)
                 popup = v->window();
         }
         if (!popup)
             return;
-        const QPoint below = mapToGlobal(QPoint(0, height()));
-        popup->move(below);
-        // ширина не меньше комбобокса
-        if (popup->width() < width())
-            popup->resize(width(), popup->height());
+
+        // Ширина не меньше комбобокса
+        const int w = qMax(popup->width(), width());
+        // Не принудительно move() вниз — Qt сам учитывает край экрана.
+        // Только подогнать ширину, сохранив позицию, выбранную Qt.
+        if (popup->width() < w)
+            popup->resize(w, popup->height());
+
+        // Если попап всё же ушёл за низ экрана — поднять
+        const QRect screen = popup->screen() ? popup->screen()->availableGeometry()
+                                             : QRect();
+        if (screen.isValid()) {
+            QRect g = popup->geometry();
+            if (g.bottom() > screen.bottom()) {
+                g.moveBottom(screen.bottom() - 4);
+                popup->setGeometry(g);
+            }
+            if (g.top() < screen.top()) {
+                g.moveTop(screen.top() + 4);
+                popup->setGeometry(g);
+            }
+            // если всё ещё не влазит — уменьшить высоту, скролл внутри
+            g = popup->geometry();
+            if (g.height() > screen.height() - 20) {
+                g.setHeight(screen.height() - 20);
+                g.moveTop(screen.top() + 10);
+                popup->setGeometry(g);
+            }
+        }
     }
 };
 
@@ -208,6 +248,26 @@ public:
             "  color: #1a1000;"
             "  padding: 0 2px;"
             "  border-radius: 2px;"
+            "}"
+            "span.wj, .wj {"
+            "  color: #c62828;"
+            "  font-weight: 500;"
+            "}"
+            "a.chnav {"
+            "  display: inline-block;"
+            "  text-decoration: none;"
+            "  color: #5a3a1a;"
+            "  background: #efe4d0;"
+            "  border: 1px solid #d4c4a8;"
+            "  border-radius: 8px;"
+            "  padding: 8px 14px;"
+            "  font-size: 0.95em;"
+            "  font-weight: 600;"
+            "}"
+            "a.chnav:hover {"
+            "  background: #e8d5b5;"
+            "  border-color: #c4a882;"
+            "  color: #3a2410;"
             "}"
             "hr {"
             "  border: none;"
@@ -1364,22 +1424,51 @@ void BibleView::applyTextStyle()
 
 namespace {
 
-bool isNewTestamentBookName(const QString &fullName)
+bool isNewTestamentBookName(const QString &fullName, const QString &shortName = QString())
 {
-    const QString n = fullName.trimmed().toLower()
-                          .replace(QString::fromUtf8("ё"), QString::fromUtf8("е"));
-    // Новый Завет начинается с Евангелий
-    if (n.contains(QString::fromUtf8("иудиф")))
+    auto norm = [](QString s) {
+        s = s.trimmed().toLower();
+        s.replace(QString::fromUtf8("ё"), QString::fromUtf8("е"));
+        return s;
+    };
+    const QString n = norm(fullName);
+    const QString s = norm(shortName);
+
+    // Явно не НЗ (апокрифы / ВЗ, которые могут пересечься по подстроке)
+    if (n.contains(QString::fromUtf8("иудиф")) || n.contains(QString::fromUtf8("сирах"))
+        || n.contains(QString::fromUtf8("товий")) || n.contains(QString::fromUtf8("маткав"))
+        || n.contains(QString::fromUtf8("маккав")))
         return false;
+
+    // Короткие коды НЗ
+    static const char *ntShort[] = {
+        "мф", "мат", "mk", "мк", "мар", "лк", "лук", "ин", "иоан",
+        "деян", "рим", "1кор", "2кор", "гал", "еф", "флп", "кол",
+        "1фес", "2фес", "1тим", "2тим", "тит", "флм", "евр", "иак",
+        "1пет", "2пет", "1ин", "2ин", "3ин", "иуд", "откр", "откровение"
+    };
+    for (const char *code : ntShort) {
+        if (!s.isEmpty() && s == QString::fromUtf8(code))
+            return true;
+    }
+
+    // Евангелия
     if (n.contains(QString::fromUtf8("от матфе")) || n.startsWith(QString::fromUtf8("матфе"))
-        || n.contains(QString::fromUtf8("ев. от матф")))
+        || n.contains(QString::fromUtf8("ев. от матф")) || n.contains(QString::fromUtf8("евангелие от матф")))
         return true;
-    if (n.contains(QString::fromUtf8("от марк")) || n.startsWith(QString::fromUtf8("марк")))
+    if (n.contains(QString::fromUtf8("от марк")) || n.startsWith(QString::fromUtf8("марк"))
+        || n.contains(QString::fromUtf8("евангелие от марк")))
         return true;
-    if (n.contains(QString::fromUtf8("от лук")) || n.startsWith(QString::fromUtf8("лук")))
+    if (n.contains(QString::fromUtf8("от лук")) || n.startsWith(QString::fromUtf8("лук"))
+        || n.contains(QString::fromUtf8("евангелие от лук")))
         return true;
     if (n.contains(QString::fromUtf8("от иоанн")) || n.contains(QString::fromUtf8("евангелие от иоанн")))
         return true;
+    // Голое «Иоанна» / «Ин» без 1/2/3 — Евангелие
+    if ((n == QString::fromUtf8("иоанна") || n == QString::fromUtf8("ин"))
+        && !n.contains(QLatin1Char('1')) && !n.contains(QLatin1Char('2')) && !n.contains(QLatin1Char('3')))
+        return true;
+
     if (n.startsWith(QString::fromUtf8("деяния")) || n.contains(QString::fromUtf8("деяния апостол")))
         return true;
     if (n.contains(QString::fromUtf8("римлян")))
@@ -1408,16 +1497,18 @@ bool isNewTestamentBookName(const QString &fullName)
         return true;
     if (n.contains(QString::fromUtf8("петра")))
         return true;
+    // 1–3 Иоанна
     if (n.contains(QString::fromUtf8("иоанна")) && (n.contains(QLatin1Char('1')) || n.contains(QLatin1Char('2'))
             || n.contains(QLatin1Char('3')) || n.contains(QString::fromUtf8("1-"))
-            || n.contains(QString::fromUtf8("2-")) || n.contains(QString::fromUtf8("3-"))))
+            || n.contains(QString::fromUtf8("2-")) || n.contains(QString::fromUtf8("3-"))
+            || n.startsWith(QString::fromUtf8("1 ")) || n.startsWith(QString::fromUtf8("2 "))
+            || n.startsWith(QString::fromUtf8("3 "))))
         return true;
     if (n.contains(QString::fromUtf8("иуды")) || n.startsWith(QString::fromUtf8("иуда"))
         || n.contains(QString::fromUtf8("послание иуды")))
         return true;
     if (n.contains(QString::fromUtf8("откровен")) || n.contains(QString::fromUtf8("апокалипс")))
         return true;
-    // MyBible / числовые id часто: >= 470 Матфей
     return false;
 }
 
@@ -1518,20 +1609,39 @@ void BibleView::setModule(Module *module)
         return;
     }
 
-    m_moduleLabel->setText(m_module->name());
+    {
+        const int nb = m_module->books().size();
+        if (nb > 0)
+            m_moduleLabel->setText(QString::fromUtf8("%1  ·  %2 кн.")
+                                       .arg(m_module->name()).arg(nb));
+        else
+            m_moduleLabel->setText(m_module->name());
+    }
 
     const QVector<BookInfo> books = m_module->books();
     const bool showTestaments = m_module->isBibleText() && !m_module->isDictionary()
                                 && books.size() >= 10;
+    // Схема нумерации: MyBible (10,20…470…) vs канон 1..66
+    bool myBibleIds = false;
+    int maxId = 0;
+    for (const auto &b : books) {
+        if (b.id > maxId) maxId = b.id;
+        if (b.id > 66)
+            myBibleIds = true;
+    }
     bool otHeader = false;
     bool ntHeader = false;
     for (const auto &book : books) {
         if (showTestaments) {
-            const bool isNT = isNewTestamentBookName(book.fullName)
-                              || book.id >= 470; // MyBible: Матфей = 470
-            // Порядковый канон 1..66: НЗ с 40
-            const bool isNTSeq = (book.id >= 40 && book.id <= 66 && book.id < 100);
-            const bool nt = isNT || isNTSeq;
+            bool nt = isNewTestamentBookName(book.fullName, book.shortName);
+            if (!nt) {
+                // id только как запасной путь, если имя не распознано
+                if (myBibleIds)
+                    nt = (book.id >= 470); // MyBible: Матфей = 470
+                else if (maxId <= 66 && books.size() >= 39)
+                    nt = (book.id >= 40 && book.id <= 66); // протестантский 1..66
+                // иначе не гадаем по id (чтобы «Числа»=40 в MyBible не стала НЗ)
+            }
             if (!nt && !otHeader) {
                 addBookComboHeader(m_bookCombo, QString::fromUtf8("—— Ветхий Завет ——"));
                 otHeader = true;
@@ -1703,12 +1813,37 @@ void BibleView::loadChapter()
             "<div style='font-weight:700; font-size:1.4em; color:#2c1810; margin:0 0 0.4em 0;'>%1</div>"
             "</div>")
                              .arg(headerText);
-        m_textView->setHtml(header + html);
+
+        // Красивые стрелки внизу главы: предыдущая / следующая
+        QString prevLabel = QString::fromUtf8("◀  Предыдущая");
+        QString nextLabel = QString::fromUtf8("Следующая  ▶");
+        QString centerLabel;
+        if (!isDictionary && m_currentChapter > 0) {
+            centerLabel = QString::fromUtf8("Глава %1").arg(m_currentChapter);
+        } else {
+            centerLabel = headerText;
+        }
+        QString footer = QStringLiteral(
+            "<div style='margin:1.6em 0 0.4em 0; padding-top:12px; border-top:1px solid #d4c4a8;'>"
+            "<table width='100%' cellspacing='0' cellpadding='0' style='border:none;'>"
+            "<tr>"
+            "<td align='left' width='33%' style='vertical-align:middle;'>"
+            "<a class='chnav' href='chnav:prev'>%1</a></td>"
+            "<td align='center' width='34%' style='vertical-align:middle;"
+            "color:#8a7a68; font-size:0.9em;'>%2</td>"
+            "<td align='right' width='33%' style='vertical-align:middle;'>"
+            "<a class='chnav' href='chnav:next'>%3</a></td>"
+            "</tr></table></div>")
+            .arg(prevLabel.toHtmlEscaped(), centerLabel.toHtmlEscaped(), nextLabel.toHtmlEscaped());
+
+        m_textView->setHtml(header + html + footer);
         m_textView->moveCursor(QTextCursor::Start);
     }
     showParallelForCurrent();
     emit verseChanged(m_currentBook, m_currentChapter, m_currentVerse);
 }
+
+
 
 
 void BibleView::showParallelForCurrent()
@@ -2044,6 +2179,27 @@ void BibleView::onAnchorClicked(const QUrl &url)
         return;
     }
 
+    if (scheme == QLatin1String("chnav")) {
+        // href="chnav:prev" / "chnav:next" — path, host или opaque
+        QString cmd = url.path();
+        if (cmd.startsWith(QLatin1Char('/')))
+            cmd = cmd.mid(1);
+        if (cmd.isEmpty())
+            cmd = url.host();
+        if (cmd.isEmpty()) {
+            QString s = url.toString(QUrl::RemoveScheme);
+            if (s.startsWith(QLatin1Char('/')))
+                s = s.mid(1);
+            cmd = s;
+        }
+        cmd = cmd.toLower().trimmed();
+        if (cmd.startsWith(QLatin1String("prev")))
+            onPrevChapter();
+        else if (cmd.startsWith(QLatin1String("next")))
+            onNextChapter();
+        return;
+    }
+
     if (url.scheme() == QStringLiteral("v")) {
         // Клик по номеру стиха: параллели + Стронг
         QString path = url.path();
@@ -2065,13 +2221,22 @@ void BibleView::onAnchorClicked(const QUrl &url)
         }
         return;
     }
-    if (url.scheme() != QStringLiteral("w"))
+    if (scheme != QLatin1String("w"))
         return;
 
     QUrlQuery q(url);
-    QString word = q.queryItemValue(QStringLiteral("g"));
-    QString meaning = q.queryItemValue(QStringLiteral("m"));
-    QString strong = q.queryItemValue(QStringLiteral("s"));
+    QString word = QUrl::fromPercentEncoding(q.queryItemValue(QStringLiteral("g")).toUtf8());
+    QString meaning = QUrl::fromPercentEncoding(q.queryItemValue(QStringLiteral("m")).toUtf8());
+    QString strong = QUrl::fromPercentEncoding(q.queryItemValue(QStringLiteral("s")).toUtf8());
+    if (strong.isEmpty() && !url.path().isEmpty()) {
+        // запасной путь: w://G976/...
+        QString pth = url.path();
+        if (pth.startsWith(QLatin1Char('/')))
+            pth = pth.mid(1);
+        if (pth.startsWith(QLatin1Char('G')) || pth.startsWith(QLatin1Char('H'))
+            || pth.startsWith(QLatin1Char('g')) || pth.startsWith(QLatin1Char('h')))
+            strong = pth.split(QLatin1Char('/')).value(0);
+    }
 
     if (word.isEmpty()) {
         QString s = url.toString();

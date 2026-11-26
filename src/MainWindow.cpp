@@ -575,7 +575,112 @@ void MainWindow::openModuleManagerFor(BibleView *view, bool managementMode)
     connect(&dlg, &ModuleManagerDialog::moduleSelected, this, [this, view](Module *module) {
         if (!module || !view)
             return;
+
+        // Позиция ТОЛЬКО из другого окна с Библией (не из целевого).
+        int refBook = 0;
+        int refChapter = 1;
+        int refVerse = 1;
+        Module *refMod = nullptr;
+
+        // 1) активное другое окно  2) первое другое с Библией
+        for (BibleView *other : m_views) {
+            if (!other || other == view || !other->isVisible() || !other->isActiveHighlight())
+                continue;
+            Module *om = other->module();
+            if (!om || !om->isValid() || !om->isBibleText() || other->currentBook() < 1)
+                continue;
+            refBook = other->currentBook();
+            refChapter = qMax(1, other->currentChapter());
+            refVerse = qMax(1, other->currentVerse());
+            refMod = om;
+            break;
+        }
+        if (refBook < 1) {
+            for (BibleView *other : m_views) {
+                if (!other || other == view || !other->isVisible())
+                    continue;
+                Module *om = other->module();
+                if (!om || !om->isValid() || !om->isBibleText() || other->currentBook() < 1)
+                    continue;
+                refBook = other->currentBook();
+                refChapter = qMax(1, other->currentChapter());
+                refVerse = qMax(1, other->currentVerse());
+                refMod = om;
+                break;
+            }
+        }
+        // Если других окон нет — сохраняем позицию текущей панели
+        if (refBook < 1 && view->module() && view->module()->isValid()
+            && view->module()->isBibleText() && view->currentBook() > 0) {
+            refBook = view->currentBook();
+            refChapter = qMax(1, view->currentChapter());
+            refVerse = qMax(1, view->currentVerse());
+            refMod = view->module();
+        }
+
+        // Блокируем синк на всё время смены модуля, иначе setModule
+        // откроет «первую книгу» и утащит соседние окна
+        const bool wasSyncing = m_syncingViews;
+        m_syncingViews = true;
+
         view->setModule(module);
+
+        if (module->isBibleText()) {
+            int targetBook = 0;
+            int targetChapter = 1;
+            int targetVerse = 1;
+
+            // Пытаемся попасть в ту же книгу, что в соседнем окне
+            if (refBook > 0 && refMod) {
+                int dstBook = module->findBookIdMatching(refMod, refBook);
+                if (dstBook < 1)
+                    dstBook = refBook;
+                bool has = false;
+                for (const auto &b : module->books()) {
+                    if (b.id == dstBook) {
+                        has = true;
+                        break;
+                    }
+                }
+                if (has) {
+                    targetBook = dstBook;
+                    targetChapter = refChapter;
+                    targetVerse = refVerse;
+                }
+            }
+
+            // Книги нет в новом модуле (напр. Бытие при только-НЗ) —
+            // открываем первую книгу модуля (для РБО — Матфей)
+            if (targetBook < 1) {
+                for (const auto &b : module->books()) {
+                    if (b.id > 0) {
+                        targetBook = b.id;
+                        targetChapter = 1;
+                        targetVerse = 1;
+                        break;
+                    }
+                }
+            }
+
+            if (targetBook > 0)
+                view->goTo(targetBook, targetChapter, targetVerse);
+
+            // Соседние окна с Библией — на ту же книгу/главу/стих
+            for (BibleView *other : m_views) {
+                if (!other || other == view || !other->isVisible())
+                    continue;
+                Module *om = other->module();
+                if (!om || !om->isValid() || !om->isBibleText())
+                    continue;
+                const int otherBook = om->findBookIdMatching(module, targetBook);
+                if (otherBook < 1)
+                    continue;
+                other->goTo(otherBook, targetChapter, targetVerse);
+            }
+        }
+
+        m_syncingViews = wasSyncing;
+
         QSettings &settings = appSettings();
         const int idx = indexOfView(view);
         const QString key = (idx >= 0) ? panelKey(idx) : QStringLiteral("panel/0");
