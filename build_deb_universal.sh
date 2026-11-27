@@ -167,9 +167,9 @@ if [ "$MAKE_DEB" -eq 1 ]; then
     cat > "$STAGE/usr/share/applications/bibleapp.desktop" <<'DESK'
 [Desktop Entry]
 Type=Application
-Name=Изучение Библии
-GenericName=Bible Study
-Comment=Чтение и изучение Библии: переводы, Стронг, словари, комментарии
+Name=ModulariuM
+GenericName=ModulariuM
+Comment=ModulariuM — чтение и изучение Библии: переводы, Стронг, словари, комментарии
 Exec=bibleapp
 Icon=/usr/share/pixmaps/bibleapp.png
 Terminal=false
@@ -196,7 +196,7 @@ Maintainer: BibleApp Developer <bibleapp@local>
 Installed-Size: $INSTALLED_SIZE
 Depends: libc6 (>= $GLIBC_DEP), libstdc++6, libqt6core6 (>= $QT_DEP_VERSION) | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6printsupport6 | libqt6printsupport6t64, libqt6sql6 | libqt6sql6t64, libqt6sql6-sqlite, qt6-qpa-plugins
 Description: Bible study application (Qt 6)
- Программа для изучения Библии: модули BibleQuote, параллельные
+ ModulariuM — изучение Библии: модули BibleQuote, параллельные
  переводы, номера Стронга, словари и комментарии, конвертация
  модулей BibleQuote в SQLite.
 EOF
@@ -225,7 +225,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
         printf '%s\n' \
             '[Desktop Entry]' \
             'Type=Application' \
-            'Name=Изучение Библии' \
+            'Name=ModulariuM' \
             'Exec=bibleapp' \
             'Icon=/usr/share/pixmaps/bibleapp.png' \
             'Terminal=false' \

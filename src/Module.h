@@ -76,6 +76,8 @@ public:
     static QString lookupStrongGloss(const QString &strongNum);
     /** Полная статья Стронга (HTML, с русским кратким значением). */
     static QString lookupStrongArticle(const QString &strongNum);
+    /** Подобрать номер Стронга по форме слова / русской глоссе */
+    static QString lookupStrongByWord(const QString &orig, const QString &gloss);
     static QString lookupGloss(const QString &greekWord);
     static QVector<CrossRef> lookupCrossRefs(int book, int chapter, int verse);
     static QString bookAbbr(int bookId);

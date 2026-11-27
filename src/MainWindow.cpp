@@ -46,7 +46,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setMinimumSize(1000, 650);
     resize(1280, 800);
-    setWindowTitle(QString::fromUtf8("Программа по изучению БИБЛИИ"));
+    setWindowTitle(QString::fromUtf8("ModulariuM"));
 
     // флаг до построения меню
     m_scrollSyncEnabled = appSettings().value(QStringLiteral("ui/scrollSync"), true).toBool();
@@ -245,7 +245,7 @@ void MainWindow::setupUi()
     auto *menuHelp = menuBar()->addMenu(QString::fromUtf8("Справка"));
     menuHelp->addAction(QString::fromUtf8("О программе"), this, [this]() {
         if (m_statusLabel)
-            m_statusLabel->setText(QString::fromUtf8("Программа по изучению БИБЛИИ, версия 0.3.2"));
+            m_statusLabel->setText(QString::fromUtf8("ModulariuM, версия 1.6.0"));
     });
 
     m_centralRoot = new QWidget(this);

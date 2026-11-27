@@ -560,6 +560,19 @@ static QString detectModuleType(const IniData &ini)
         || name.contains(QString::fromUtf8("макинтош")))
         return QStringLiteral("commentary");
 
+    if (name.contains(QString::fromUtf8("подстроч"))
+        || name.contains(QLatin1String("interlinear"))
+        || name.contains(QLatin1String("interlin"))
+        || name.contains(QString::fromUtf8("межстроч"))
+        || name.contains(QLatin1String("greek-russian"))
+        || name.contains(QString::fromUtf8("греч"))
+        || ini.flag(QStringLiteral("greek"), false)
+        || ini.flag(QStringLiteral("hebrew"), false)
+        || ini.flag(QStringLiteral("strongnumbers"), false)
+           && (name.contains(QString::fromUtf8("подстр"))
+               || name.contains(QLatin1String("inter"))))
+        return QStringLiteral("interlinear");
+
     return QStringLiteral("bible");
 }
 
@@ -1053,6 +1066,14 @@ static QVector<VerseMark> extractSupMarks(const QString &html)
         parseRangeInText(inner, num, endNum);
         if (num <= 0 || num > 300)
             continue;
+        // <sup>2</sup>*  — сноска
+        const QString afterSup = html.mid(m.capturedEnd(), 8).trimmed();
+        if (afterSup.startsWith(QLatin1Char('*')))
+            continue;
+        const QString inn = inner.trimmed();
+        if (inn.contains(QLatin1Char('*')) && !inn.contains(QLatin1Char('-'))
+            && inn.length() < 6)
+            continue;
         marks.append({num, endNum, int(m.capturedStart()), int(m.capturedEnd())});
     }
     return marks;
@@ -1070,7 +1091,7 @@ static QVector<VerseMark> extractPMarks(const QString &html, const QString &modu
         starts << int(it.next().capturedStart());
 
     static const QRegularExpression reRange(
-        QStringLiteral("^(\\d{1,3})\\s*[-–—]\\s*(\\d{1,3})"));
+        QStringLiteral("^(\\d{1,3})[a-zA-Zа-яА-ЯёЁ]?\\s*[-–—]\\s*(\\d{1,3})[a-zA-Zа-яА-ЯёЁ]?"));
     static const QRegularExpression reNum(
         QStringLiteral("^(\\d{1,3})(?:\\s*[\\.\\)\\:\\*]|\\s|$)"));
     static const QRegularExpression reSupLead(
@@ -1078,6 +1099,8 @@ static QVector<VerseMark> extractPMarks(const QString &html, const QString &modu
                        "(?:<[^>]+>)*\\s*</sup>"),
         QRegularExpression::CaseInsensitiveOption);
 
+    static const QRegularExpression reFootOnly(
+        QStringLiteral("^(\\d{1,3})\\s*[*†‡§]\\s*$"));
     for (int i = 0; i < starts.size(); ++i) {
         const int start = starts[i];
         const int end = (i + 1 < starts.size()) ? starts[i + 1] : html.size();
@@ -1087,6 +1110,17 @@ static QVector<VerseMark> extractPMarks(const QString &html, const QString &modu
         const int pEnd = gt + 1;
         const QString para = html.mid(pEnd, end - pEnd);
         const QString plain = stripTagsToPlain(para.left(400)).trimmed();
+
+        // «2 *» / «3*» — сноска, не начало стиха
+        if (reFootOnly.match(plain).hasMatch())
+            continue;
+        // абзац из одних сносок «2 * 3 * 4 * 5 *»
+        {
+            QString p2 = plain;
+            p2.replace(QRegularExpression(QString::fromUtf8(R"(\d{1,3}\s*[*†‡§])")), QString());
+            if (plain.contains(QLatin1Char('*')) && p2.trimmed().isEmpty())
+                continue;
+        }
 
         int num = 0;
         int endNum = 0;
@@ -1212,6 +1246,20 @@ static QVector<VerseMark> extractInlineMarks(const QString &html)
         const int n = m.captured(1).toInt();
         if (n <= 0 || n > 300)
             continue;
+        // после номера только * или конец — сноска, не стих
+        const int after = m.capturedEnd();
+        const QString tail = plain.mid(after, 12).trimmed();
+        if (tail.startsWith(QLatin1Char('*')) || tail.startsWith(QString::fromUtf8("†"))
+            || tail.startsWith(QString::fromUtf8("‡")))
+            continue;
+        // проверяем, что дальше есть буквы (текст стиха)
+        bool hasLetter = false;
+        for (int k = after; k < plain.size() && k < after + 80; ++k) {
+            if (plain.at(k).isLetter()) { hasLetter = true; break; }
+            if (plain.at(k) == QLatin1Char('\n')) break;
+        }
+        if (!hasLetter)
+            continue;
         marks.append({n, n, int(m.capturedStart()), int(m.capturedEnd())});
     }
     return marks;
@@ -1219,36 +1267,27 @@ static QVector<VerseMark> extractInlineMarks(const QString &html)
 
 static QVector<VerseMark> filterVerseMarks(QVector<VerseMark> marks)
 {
+    std::sort(marks.begin(), marks.end(), [](const VerseMark &a, const VerseMark &b) {
+        if (a.markStart != b.markStart)
+            return a.markStart < b.markStart;
+        return a.num < b.num;
+    });
+
     QVector<VerseMark> out;
-    int prev = 0;
+    int coveredUntil = 0;
 
     for (const VerseMark &m : marks) {
         if (m.num <= 0 || m.num > 300)
             continue;
-        if (out.isEmpty()) {
-            out << m;
-            prev = m.num;
+        // внутри уже покрытого диапазона (сноски 2* 3* при «1-6а»)
+        if (m.num <= coveredUntil)
             continue;
-        }
-        if (m.num == prev)
+        if (!out.isEmpty() && out.last().num == m.num)
             continue;
-        if (m.num > prev && m.num <= prev + 10) {
-            out << m;
-            prev = m.num;
-            continue;
-        }
-        if (m.endNum > m.num && m.num > prev) {
-            // Диапазон комментария: 1-17, 18-25 и т.п.
-            out << m;
-            prev = m.num;
-            continue;
-        }
-        if (m.num == 1 && prev >= 2) {
-            out << m;
-            prev = m.num;
-            continue;
-        }
-        // Назад — почти наверняка сноска/номер страницы, пропускаем
+
+        out << m;
+        const int end = (m.endNum > m.num) ? m.endNum : m.num;
+        coveredUntil = qMax(coveredUntil, end);
     }
     return out;
 }
@@ -1285,25 +1324,8 @@ static QString cleanVerseText(QString text, int verseNum, bool stripLeading,
                 text = text.mid(bm.capturedEnd());
         }
 
-        // «1. », «1) », «1: », «1* », «1 »
-        static const QRegularExpression reLead(
-            QStringLiteral("^\\s*(\\d{1,3})\\s*(?:[\\.\\)\\:\\*]\\s*|\\s+)"));
-        auto m = reLead.match(text);
-        if (m.hasMatch()) {
-            const int n = m.captured(1).toInt();
-            if (n == verseNum || (n > 0 && n <= 200))
-                text = text.mid(m.capturedEnd());
-        }
-
-        // Диапазон в начале: «1-17 »
-        static const QRegularExpression reRange(
-            QStringLiteral("^\\s*(\\d{1,3})\\s*[-–—]\\s*(\\d{1,3})\\s*"));
-        auto rm = reRange.match(text);
-        if (rm.hasMatch()) {
-            const int n = rm.captured(1).toInt();
-            if (n == verseNum || (n > 0 && n <= 200))
-                text = text.mid(rm.capturedEnd());
-        }
+        // Номера/диапазоны «1-6а», «6б-11», «17» оставляем в тексте как в источнике.
+        // Не вырезаем их (стиль «Радостная Весть» и подобные).
 
         // Ведущий <sup>N</sup>
         static const QRegularExpression reSup(
@@ -1413,6 +1435,157 @@ static bool upsertVerse(QSqlQuery &select, QSqlQuery &insert, int bookId, int ch
 // ============================================================================
 //  Разбор главы
 // ============================================================================
+
+
+/** Стиль «Радостная Весть»: блоки «1-6а … 2* 3*», «6б-11 …», «17 Текст».
+ *  Делим только по реальным началам блоков; сноски «2 *» не становятся стихами. */
+static QVector<VerseMark> extractRangeStyleMarks(const QString &html)
+{
+    QVector<VerseMark> marks;
+    // В plain-тексте ищем начала блоков
+    const QString plain = htmlToPlainWithLines(html);
+
+    // Диапазон: 1-6а | 6б-11 | 12-16
+    // Обычный стих: 17 + пробел + буква (не *)
+    static const QRegularExpression reBlock(
+        QStringLiteral(
+            "(?:^|[\\n\\r])[ \\t]*"
+            "("
+              "\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?\\s*[-–—]\\s*\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?"
+              "|"
+              "\\d{1,3}"
+            ")"
+            "(?=[ \\t]+[A-Za-zА-Яа-яЁё«\"„(])"
+        ),
+        QRegularExpression::MultilineOption);
+
+    struct Hit { int num; int endNum; int pos; int endPos; QString label; };
+    QVector<Hit> hits;
+
+    auto it = reBlock.globalMatch(plain);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const QString label = m.captured(1).trimmed();
+        int startN = 0, endN = 0;
+        parseRangeInText(label, startN, endN);
+        if (startN <= 0 || startN > 300)
+            continue;
+        // отсечь ложные «2 *» — lookahead уже требует букву, но на всякий случай
+        const int afterLabel = m.capturedEnd();
+        const QString tail = plain.mid(afterLabel, 6).trimmed();
+        if (tail.startsWith(QLatin1Char('*')))
+            continue;
+        hits.append({startN, endN > startN ? endN : startN,
+                     int(m.capturedStart()), int(m.capturedEnd()), label});
+    }
+
+    if (hits.size() < 2)
+        return marks;
+
+    // Сколько диапазонов — признак стиля РВ
+    int rangeCount = 0;
+    for (const Hit &h : hits)
+        if (h.endNum > h.num)
+            ++rangeCount;
+    if (rangeCount < 1)
+        return marks; // обычный модуль — не вмешиваемся
+
+    // Позиции в plain нельзя напрямую мапить в html; работаем с plain-разбиением
+    // через специальные маркеры в html: вставляем якоря не будем —
+    // parseChapterChunkRangeStyle обработает plain целиком.
+    for (const Hit &h : hits)
+        marks.append({h.num, h.endNum, h.pos, h.endPos});
+
+    return marks;
+}
+
+/** Разбор главы в стиле диапазонов (Радостная Весть) из plain-текста. */
+static int parseRangeStyleChapter(const QString &html, int chapterNum, int bookId,
+                                  bool strongLinks, QSqlQuery &select, QSqlQuery &insert)
+{
+    QString plain = htmlToPlainWithLines(html);
+    plain.replace(QRegularExpression(QStringLiteral("[\\t\\v\\f]+")), QStringLiteral(" "));
+
+    static const QRegularExpression reBlock(
+        QStringLiteral(
+            "(?:^|[\\n\\r])[ \\t]*"
+            "("
+              "\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?\\s*[-–—]\\s*\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?"
+              "|"
+              "\\d{1,3}"
+            ")"
+            "(?=[ \\t]+[A-Za-zА-Яа-яЁё«\"„(])"
+        ),
+        QRegularExpression::MultilineOption);
+
+    struct Hit { int num; int endNum; int pos; int labelLen; };
+    QVector<Hit> hits;
+    auto it = reBlock.globalMatch(plain);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        QString label = m.captured(1).trimmed();
+        int startN = 0, endN = 0;
+        parseRangeInText(label, startN, endN);
+        if (startN <= 0 || startN > 300)
+            continue;
+        const QString tail = plain.mid(m.capturedEnd(), 6).trimmed();
+        if (tail.startsWith(QLatin1Char('*')))
+            continue;
+        // capturedStart may include newline — body starts at label
+        int labelStart = int(m.capturedStart());
+        // shift to first digit
+        while (labelStart < plain.size() && !plain.at(labelStart).isDigit())
+            ++labelStart;
+        hits.append({startN, endN > startN ? endN : startN,
+                     labelStart, label.size()});
+    }
+
+    if (hits.isEmpty())
+        return 0;
+
+    int inserted = 0;
+    for (int i = 0; i < hits.size(); ++i) {
+        const Hit &h = hits[i];
+        const int to = (i + 1 < hits.size()) ? hits[i + 1].pos : plain.size();
+        QString body = plain.mid(h.pos, to - h.pos).trimmed();
+        // нормализуем пробелы, сохраняя переносы абзацев
+        body.replace(QRegularExpression(QStringLiteral(" *\\n *")), QStringLiteral("\n"));
+        body.replace(QRegularExpression(QStringLiteral("\\n{3,}")), QStringLiteral("\n\n"));
+        body = body.trimmed();
+
+        bool hasLetter = false;
+        for (QChar ch : body) {
+            if (ch.isLetter()) { hasLetter = true; break; }
+        }
+        if (!hasLetter)
+            continue;
+
+        // лёгкая очистка HTML-сущностей уже сделана; strong не трогаем в plain
+        Q_UNUSED(strongLinks);
+        if (upsertVerse(select, insert, bookId, chapterNum, h.num, body, false))
+            ++inserted;
+    }
+    return inserted;
+}
+
+static bool chapterLooksLikeRangeStyle(const QString &html)
+{
+    const QString plain = stripTagsToPlain(html.left(8000));
+    static const QRegularExpression reRange(
+        QStringLiteral("\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?\\s*[-–—]\\s*\\d{1,3}[a-zA-Zа-яА-ЯёЁ]?"));
+    int ranges = 0;
+    auto it = reRange.globalMatch(plain);
+    while (it.hasNext()) {
+        it.next();
+        ++ranges;
+        if (ranges >= 2)
+            return true;
+    }
+    // сноски 2 * 3 * 4 *
+    static const QRegularExpression reFoots(
+        QStringLiteral("\\d{1,3}\\s*\\*\\s*\\d{1,3}\\s*\\*"));
+    return reFoots.match(plain).hasMatch() && ranges >= 1;
+}
 
 static QVector<VerseMark> extractVerseMarks(const QString &chapterHtml,
                                             const QString &verseSign,
@@ -1554,6 +1727,18 @@ static int parseChapterChunk(const QString &chunk, int chapterNum, int bookId,
                              QSqlQuery &select, QSqlQuery &insert,
                              QString *methodOut)
 {
+    // Радостная Весть и подобные — разбор «как в источнике»
+    if (moduleKind != QLatin1String("commentary")
+        && moduleKind != QLatin1String("dictionary")
+        && chapterLooksLikeRangeStyle(chunk)) {
+        if (methodOut)
+            *methodOut = QStringLiteral("range-style");
+        const int n = parseRangeStyleChapter(chunk, chapterNum, bookId,
+                                             strongLinks, select, insert);
+        if (n > 0)
+            return n;
+    }
+
     QVector<VerseMark> marks = extractVerseMarks(chunk, verseSign, moduleKind, methodOut);
     marks = filterVerseMarks(marks);
     const bool supMethod = (methodOut && *methodOut == QLatin1String("sup"));
@@ -1641,24 +1826,19 @@ static int parseChapterChunk(const QString &chunk, int chapterNum, int bookId,
         if (reOnlyFoot.match(cleaned.trimmed()).hasMatch())
             cleaned.clear();
 
-        const bool allowEmpty = !commentary;
-        if ((cleaned.length() >= 1 || allowEmpty)
-            && upsertVerse(select, insert, bookId, chapterNum, m.num, cleaned, allowEmpty)) {
-            ++inserted;
-        }
-
-        // Диапазон «1-6» без отдельных маркеров 2..5 — дописываем пустые стихи
-        if (!commentary && m.endNum > m.num + 1) {
-            QSet<int> have;
-            for (const VerseMark &mm : marks)
-                have.insert(mm.num);
-            for (int v = m.num + 1; v < m.endNum; ++v) {
-                if (have.contains(v))
-                    continue;
-                if (upsertVerse(select, insert, bookId, chapterNum, v, QString(), true))
-                    ++inserted;
+        // Не создаём пустые стихи — нужен реальный текст с буквами.
+        {
+            bool hasLetter = false;
+            for (QChar ch : cleaned) {
+                if (ch.isLetter()) { hasLetter = true; break; }
+            }
+            if (hasLetter
+                && upsertVerse(select, insert, bookId, chapterNum, m.num, cleaned, false)) {
+                ++inserted;
             }
         }
+
+        // Диапазоны (1-6а и т.п.) — один блок, без пустых промежуточных стихов.
     }
     return inserted;
 }

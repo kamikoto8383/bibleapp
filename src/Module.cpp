@@ -605,51 +605,96 @@ static bool isMorphToken(const QString &s)
     return hasHyphen;
 }
 
+static bool isLatinGreekToken(const QString &s)
+{
+    if (s.isEmpty() || s.size() > 48)
+        return false;
+    if (isStrongNumToken(s) || isMorphToken(s))
+        return false;
+    if (isCyrillicToken(s) || isGreekToken(s) || isHebrewToken(s))
+        return false;
+
+    int letters = 0, latin = 0;
+    for (QChar c : s) {
+        if (c.isLetter()) {
+            ++letters;
+            const QChar l = c.toLower();
+            if (l >= QLatin1Char('a') && l <= QLatin1Char('z'))
+                ++latin;
+        } else if (c.isDigit()) {
+            return false;
+        }
+    }
+    // только латиница
+    if (letters < 1 || latin != letters)
+        return false;
+    return true;
+}
+
+static bool isOrigLangToken(const QString &s)
+{
+    return isGreekToken(s) || isHebrewToken(s) || isLatinGreekToken(s);
+}
+
 static bool looksLikePlainInterlinear(const QString &text)
 {
     if (text.isEmpty())
         return false;
-    // Уже размеченный формат
     if (text.contains(QChar(0x00A6)) || text.contains(QLatin1Char('|')))
         return true;
     const QStringList parts = text.split(QRegularExpression(QStringLiteral("\\s+")),
                                          Qt::SkipEmptyParts);
-    if (parts.size() < 6)
+    if (parts.size() < 4)
         return false;
-    int greek = 0, cyr = 0, strongs = 0, morphs = 0;
+    int orig = 0, cyr = 0, strongs = 0, morphs = 0, latinG = 0;
     for (const QString &p : parts) {
         if (isGreekToken(p) || isHebrewToken(p))
-            ++greek;
-        else if (isCyrillicToken(p))
+            ++orig;
+        else if (isLatinGreekToken(p)) {
+            ++orig;
+            ++latinG;
+        } else if (isCyrillicToken(p))
             ++cyr;
         else if (isStrongNumToken(p))
             ++strongs;
         else if (isMorphToken(p))
             ++morphs;
     }
-    // Типичный подстрочник: много греч./ивр. + переводы + стронги
-    return greek >= 3 && (cyr >= 2 || strongs >= 2) && (strongs + morphs) >= 2;
+    // Unicode-подстрочник со стронгами
+    if (orig >= 3 && (cyr >= 2 || strongs >= 2) && (strongs + morphs) >= 2)
+        return true;
+    // Латинизированный подстрочник BibleQuote: presbuteroV Старец eklekth избранной …
+    if (latinG >= 3 && cyr >= 3)
+        return true;
+    // чередование orig/cyr
+    int pairs = 0;
+    for (int i = 0; i + 1 < parts.size(); ++i) {
+        if (isOrigLangToken(parts.at(i)) && isCyrillicToken(parts.at(i + 1)))
+            ++pairs;
+    }
+    if (pairs >= 3)
+        return true;
+    return false;
 }
 
 static QString makeInterlinearChip(const QString &orig, const QString &gloss,
                                    const QString &strong, const QString &morph)
 {
     QString strongFull = strong.trimmed().toUpper();
-    if (!strongFull.isEmpty() && strongFull[0].isDigit())
-        strongFull.prepend(QLatin1Char('G')); // НЗ по умолчанию
+    if (!strongFull.isEmpty() && strongFull[0].isDigit()) {
+        // H для иврита, иначе G
+        if (isHebrewToken(orig))
+            strongFull.prepend(QLatin1Char('H'));
+        else
+            strongFull.prepend(QLatin1Char('G'));
+    }
 
-    QUrl href;
-    href.setScheme(QStringLiteral("w"));
-    href.setPath(QStringLiteral("/"));
-    QUrlQuery uq;
-    uq.addQueryItem(QStringLiteral("g"), orig);
-    if (!gloss.isEmpty())
-        uq.addQueryItem(QStringLiteral("m"), gloss);
-    if (!strongFull.isEmpty())
-        uq.addQueryItem(QStringLiteral("s"), strongFull);
-    if (!morph.isEmpty())
-        uq.addQueryItem(QStringLiteral("morph"), morph);
-    href.setQuery(uq);
+    // Если стронга нет — пробуем найти по форме / глоссе
+    if (strongFull.isEmpty()) {
+        const QString guessed = Module::lookupStrongByWord(orig, gloss);
+        if (!guessed.isEmpty())
+            strongFull = guessed;
+    }
 
     QString title = strongFull;
     if (!gloss.isEmpty())
@@ -695,9 +740,11 @@ static QString annotatePlainInterlinear(const QString &text)
     const int n = parts.size();
     while (i < n) {
         const QString &tok = parts.at(i);
-        if (isGreekToken(tok) || isHebrewToken(tok)) {
+        if (isOrigLangToken(tok)) {
             const QString orig = tok;
             ++i;
+            // несколько латинских/греч. кусков подряд без кириллицы — одно «слово»?
+            // обычно один токен = одно слово
             QStringList glossParts;
             while (i < n && isCyrillicToken(parts.at(i))) {
                 glossParts << parts.at(i);
@@ -713,13 +760,17 @@ static QString annotatePlainInterlinear(const QString &text)
                 morph = parts.at(i);
                 ++i;
             }
-            // если стронга нет, но морфология похожа на число — уже обработано
             out << makeInterlinearChip(orig, glossParts.join(QLatin1Char(' ')), strong, morph);
         } else {
-            // пунктуация / мусор — пропускаем или показываем мелко
-            if (!isStrongNumToken(tok) && !isMorphToken(tok) && !isCyrillicToken(tok))
+            // пунктуация / мусор
+            if (!isStrongNumToken(tok) && !isMorphToken(tok) && !isCyrillicToken(tok)) {
                 out << QStringLiteral("<span style=\"color:#999; font-size:11px;\">%1</span> ")
                            .arg(tok.toHtmlEscaped());
+            } else if (isCyrillicToken(tok)) {
+                // кириллица без исходника — показываем как обычный текст
+                out << QStringLiteral("<span style=\"color:#5a4a3a;\">%1</span> ")
+                           .arg(tok.toHtmlEscaped());
+            }
             ++i;
         }
     }
@@ -1004,8 +1055,18 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
         || m_type.toLower().contains(QString::fromUtf8("слов"));
 
     while (query.next()) {
-        int v = query.value(0).toInt();
+        const int v = query.value(0).toInt();
         QString text = query.value(1).toString();
+        // Пустые «стихи» (заполнители диапазона) не показываем
+        {
+            bool hasLetter = false;
+            for (QChar ch : text) {
+                if (ch.isLetter()) { hasLetter = true; break; }
+            }
+            if (!hasLetter)
+                continue;
+        }
+
         // Пустой стих (заполнитель после диапазона 1–6) — только номер
         if (text.trimmed().isEmpty() || text == QString(QChar(0x200B)))
             text.clear();
@@ -1024,10 +1085,14 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
             }
 
             const QString typeLow = m_type.toLower();
+            const QString nameLow = m_name.toLower();
             const bool forceInterlinear =
                 typeLow.contains(QLatin1String("interlinear"))
                 || typeLow.contains(QString::fromUtf8("подстроч"))
-                || typeLow.contains(QLatin1String("interlin"));
+                || typeLow.contains(QLatin1String("interlin"))
+                || nameLow.contains(QString::fromUtf8("подстроч"))
+                || nameLow.contains(QLatin1String("interlinear"))
+                || nameLow.contains(QLatin1String("interlin"));
 
             if (forceInterlinear || looksLikePlainInterlinear(stripped))
                 text = annotateGreek(stripped);
@@ -1037,15 +1102,21 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
                 text = working.toHtmlEscaped();
         }
 
-        // Убираем ведущий номер стиха, если он остался в сохранённом тексте
+        // Диапазоны и номера из источника («1-6а», «17 ») не трогаем.
+        // Убираем только технический <sup>N</sup> и мусорные сноски в начале.
         {
-            static const QRegularExpression reLeadNum(
-                QStringLiteral(R"(^\s*\d{1,3}[\.\)\:\*]?\s+)"));
-            text.replace(reLeadNum, QString());
-            static const QRegularExpression reLeadSup(
-                QStringLiteral(R"(^\s*<sup\b[^>]*>\s*\d{1,3}\s*</sup>\s*)"),
-                QRegularExpression::CaseInsensitiveOption);
-            text.replace(reLeadSup, QString());
+            static const QRegularExpression reHasOwnNum(
+                QStringLiteral(R"(^\s*\d{1,3}[a-zA-Zа-яА-ЯёЁ]?(?:\s*[-–—]\s*\d{1,3}[a-zA-Zа-яА-ЯёЁ]?)?)"));
+            const bool keepSourceNum = reHasOwnNum.match(text).hasMatch();
+            if (!keepSourceNum) {
+                static const QRegularExpression reLeadNum(
+                    QStringLiteral(R"(^\s*\d{1,3}[\.\)\:\*]\s+)"));
+                text.replace(reLeadNum, QString());
+                static const QRegularExpression reLeadSup(
+                    QStringLiteral(R"(^\s*<sup\b[^>]*>\s*\d{1,3}\s*</sup>\s*)"),
+                    QRegularExpression::CaseInsensitiveOption);
+                text.replace(reLeadSup, QString());
+            }
             static const QRegularExpression reJunkLead(
                 QStringLiteral(R"(^[\*\†\‡\§]+\s*)"));
             text.replace(reJunkLead, QString());
@@ -1083,9 +1154,12 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
         }
 
         QString numberHtml;
-        if (isCommentary) {
-            // В комментариях/словарях не показываем номера «псевдо-стихов»,
-            // но оставляем якорь для навигации.
+        // Если в тексте уже есть номер/диапазон как в источнике («1-6а», «17 »),
+        // не дублируем цифру сверху.
+        static const QRegularExpression reHasOwnNum(
+            QStringLiteral(R"(^\s*(?:<[^>]+>\s*)*\d{1,3}[a-zA-Zа-яА-ЯёЁ]?(?:\s*[-–—]\s*\d{1,3}[a-zA-Zа-яА-ЯёЁ]?)?)"));
+        const bool textHasNum = reHasOwnNum.match(text).hasMatch();
+        if (isCommentary || textHasNum) {
             numberHtml = QStringLiteral("<a name='v%1'></a>").arg(v);
         } else {
             numberHtml = QString(
@@ -1528,6 +1602,59 @@ static QString normalizeStrongNum(QString s)
         return s.left(1) + digits;
     }
     return s;
+}
+
+
+QString Module::lookupStrongByWord(const QString &orig, const QString &gloss)
+{
+    QSqlDatabase &db = strongsDb();
+    if (!db.isOpen())
+        return {};
+
+    const QString g = gloss.trimmed();
+    const QString o = orig.trimmed();
+
+    if (g.size() >= 2) {
+        QString key = g.toLower();
+        const int cut = key.indexOf(QRegularExpression(QStringLiteral("[\\s,;\\.]")));
+        if (cut > 0)
+            key = key.left(cut).trimmed();
+        if (key.size() >= 2) {
+            QSqlQuery q(db);
+            // ищем слово в русской статье
+            q.prepare(QStringLiteral(
+                "SELECT num FROM strongs WHERE gloss_ru LIKE ? "
+                "ORDER BY length(gloss_ru) ASC LIMIT 1"));
+            q.addBindValue(QLatin1Char('%') + key + QLatin1Char('%'));
+            if (q.exec() && q.next()) {
+                const QString num = q.value(0).toString();
+                if (!num.isEmpty())
+                    return num;
+            }
+        }
+    }
+
+    if (o.size() >= 2) {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT num FROM strongs WHERE lemma LIKE ? LIMIT 1"));
+        q.addBindValue(QLatin1Char('%') + o + QLatin1Char('%'));
+        if (q.exec() && q.next()) {
+            const QString num = q.value(0).toString();
+            if (!num.isEmpty())
+                return num;
+        }
+        q.prepare(QStringLiteral(
+            "SELECT num FROM strongs WHERE lower(lemma) LIKE ? LIMIT 1"));
+        q.addBindValue(QLatin1Char('%') + o.toLower() + QLatin1Char('%'));
+        if (q.exec() && q.next()) {
+            const QString num = q.value(0).toString();
+            if (!num.isEmpty())
+                return num;
+        }
+    }
+
+    return {};
 }
 
 QString Module::lookupStrongGloss(const QString &strongNum)

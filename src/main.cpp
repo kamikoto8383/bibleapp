@@ -37,10 +37,10 @@ static void loadBundledFonts()
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    QApplication::setOrganizationName(QStringLiteral("BibleApp"));
-    QApplication::setApplicationName(QStringLiteral("BibleApp"));
-    QApplication::setApplicationVersion(QStringLiteral("1.5.33"));
-    QApplication::setApplicationDisplayName(QString::fromUtf8("Программа по изучению БИБЛИИ"));
+    QApplication::setOrganizationName(QStringLiteral("ModulariuM"));
+    QApplication::setApplicationName(QStringLiteral("ModulariuM"));
+    QApplication::setApplicationVersion(QStringLiteral("1.6.0"));
+    QApplication::setApplicationDisplayName(QString::fromUtf8("ModulariuM"));
     QLocale::setDefault(QLocale(QLocale::Russian, QLocale::Russia));
 
     loadBundledFonts();

@@ -11,7 +11,7 @@ TitleBar::TitleBar(QWidget *parent)
     setFixedHeight(38);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    m_titleLabel = new QLabel(QString::fromUtf8("Программа для изучения БИБЛИИ"), this);
+    m_titleLabel = new QLabel(QString::fromUtf8("ModulariuM"), this);
     m_titleLabel->setAlignment(Qt::AlignCenter);
     m_titleLabel->setStyleSheet("font-weight: 600; font-size: 13px;");
 
