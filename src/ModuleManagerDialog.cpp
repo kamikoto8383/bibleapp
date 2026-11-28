@@ -200,6 +200,7 @@ ModuleManagerDialog::ModuleManagerDialog(ModuleManager *manager, QWidget *parent
         makeCat(tr("Комментарии"), CatComment);
         makeCat(tr("Толкования"), CatExposition);
         makeCat(tr("Подстрочники"), CatInterlinear);
+        makeCat(tr("Сноски"), CatFootnotes);
         catRow->addStretch();
         layout->addLayout(catRow);
         m_category = CatBible;
@@ -422,6 +423,8 @@ void ModuleManagerDialog::refreshList()
                 what = tr("толкований");
             else if (m_category == CatInterlinear)
                 what = tr("подстрочников");
+            else if (m_category == CatFootnotes)
+                what = tr("сносок");
             else
                 what = tr("модулей");
             m_infoLabel->setText(tr("Нет установленных %1 в этой категории.\n"
@@ -445,6 +448,13 @@ int ModuleManagerDialog::classifyModule(Module *m)
 
     const QString t = m->type().toLower();
     const QString n = (m->name() + QLatin1Char(' ') + t).toLower();
+
+    // Сноски / критический аппарат (к подстрочникам)
+    if (t.contains(QLatin1String("footnote")) || t.contains(QString::fromUtf8("сноск"))
+        || t.contains(QLatin1String("apparatus")) || t.contains(QString::fromUtf8("аппарат"))
+        || n.contains(QLatin1String("footnote")) || n.contains(QString::fromUtf8("сноск"))
+        || n.contains(QString::fromUtf8("критическ")) || n.contains(QString::fromUtf8("аппарат")))
+        return CatFootnotes;
 
     // Подстрочники
     if (t.contains(QLatin1String("interlinear")) || t.contains(QString::fromUtf8("подстроч"))

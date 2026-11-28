@@ -688,10 +688,46 @@ static QString strongLinkHtml(const QString &rawNumber)
         .arg(href.toString(QUrl::FullyEncoded), n);
 }
 
+/** Нормализует красный текст (слова Иисуса) к единому span. */
+static QString normalizeRedLetterHtml(QString html)
+{
+    static const QRegularExpression reFontOpen(
+        QStringLiteral(
+            "<font\\b[^>]*\\bcolor\\s*=\\s*[\"']?\\s*"
+            "(?:#?(?:ff0000|c00000|c62828|cc0000|b71c1c|e53935|f44336|d32f2f|800000|990000|8b0000|a52a2a|b22222|dc143c|b71c1c|red)|"
+            "rgb\\s*\\(\\s*2?5?5\\s*,\\s*0\\s*,\\s*0\\s*\\))"
+            "[\"']?[^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reFontClose(
+        QStringLiteral("</font\\s*>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reSpanRedOpen(
+        QStringLiteral(
+            "<span\\b[^>]*style\\s*=\\s*[\"'][^\"']*\\bcolor\\s*:\\s*"
+            "(?:#?(?:ff0000|c00000|c62828|cc0000|b71c1c|e53935|f44336|d32f2f)|red|"
+            "rgb\\s*\\(\\s*2?5?5\\s*,\\s*0\\s*,\\s*0\\s*\\))"
+            "[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reWjClass(
+        QStringLiteral(
+            "<(?:span|font)\\b[^>]*class\\s*=\\s*[\"'][^\"']*"
+            "(?:\\bwj\\b|words?[-_]?of[-_]?jesus|jesus[-_]?words)"
+            "[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    const QString open = QStringLiteral("<span style=\"color:#c62828;font-weight:500\">");
+    const QString close = QStringLiteral("</span>");
+    html.replace(reFontOpen, open);
+    html.replace(reWjClass, open);
+    html.replace(reSpanRedOpen, open);
+    html.replace(reFontClose, close);
+    return html;
+}
+
 /** Приводит фрагмент к «чистому» inline-HTML: только i/b/sup/sub/a/br. */
 static QString cleanInlineHtml(QString html, bool strongLinks)
 {
     html.remove(QChar(0xFEFF));
+    html = normalizeRedLetterHtml(html);
 
     static const QRegularExpression reScript(
         QStringLiteral("<script[^>]*>.*?</script>"),
@@ -750,9 +786,21 @@ static QString cleanInlineHtml(QString html, bool strongLinks)
 
     // Убираем все теги, кроме разрешённых
     static const QRegularExpression reOther(
-        QStringLiteral("<(?!/?(?:i|b|sup|sub|a|br)\\b)[^>]*>"),
+        QStringLiteral("<(?!/?(?:i|b|sup|sub|a|br|span)\\b)[^>]*>"),
         QRegularExpression::CaseInsensitiveOption);
     html.replace(reOther, QStringLiteral(" "));
+
+    // span без красного стиля — снимаем обёртку
+    {
+        static const QRegularExpression reBadSpanOpen(
+            QStringLiteral("<span\\b(?![^>]*c62828)[^>]*>"),
+            QRegularExpression::CaseInsensitiveOption);
+        html.replace(reBadSpanOpen, QString());
+        static const QRegularExpression reEmptySpan(
+            QStringLiteral("<span[^>]*>\\s*</span>"),
+            QRegularExpression::CaseInsensitiveOption);
+        html.replace(reEmptySpan, QString());
+    }
 
     // Ссылки нам не нужны — оставляем только текст
     static const QRegularExpression reAOpen(
@@ -1503,7 +1551,14 @@ static QVector<VerseMark> extractRangeStyleMarks(const QString &html)
 static int parseRangeStyleChapter(const QString &html, int chapterNum, int bookId,
                                   bool strongLinks, QSqlQuery &select, QSqlQuery &insert)
 {
-    QString plain = htmlToPlainWithLines(html);
+    QString work = normalizeRedLetterHtml(html);
+    const QString redOpenMark = QStringLiteral("[[RED]]");
+    const QString redCloseMark = QStringLiteral("[[/RED]]");
+    work.replace(QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"), redOpenMark);
+    work.replace(QStringLiteral("</span>"), redCloseMark);
+    QString plain = htmlToPlainWithLines(work);
+    plain.replace(redOpenMark, QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"));
+    plain.replace(redCloseMark, QStringLiteral("</span>"));
     plain.replace(QRegularExpression(QStringLiteral("[\\t\\v\\f]+")), QStringLiteral(" "));
 
     static const QRegularExpression reBlock(
@@ -3201,9 +3256,11 @@ ConversionResult Converter::convertMyBible(const QString &sqliteFilePath, const 
                 ins.addBindValue(q.value(0).toInt());
                 ins.addBindValue(q.value(1).toInt());
                 ins.addBindValue(q.value(2).toInt());
-                ins.addBindValue(q.value(3).toString());
+                QString vtext = q.value(3).toString();
+                if (vtext.contains(QLatin1Char('<')))
+                    vtext = normalizeRedLetterHtml(vtext);
+                ins.addBindValue(vtext);
                 ins.exec();
-                ins.finish();
                 ++n;
                 if (n % 2000 == 0) {
                     emit progress(n, n + 1, QString::fromUtf8("Стихов: %1…").arg(n));
@@ -3306,9 +3363,20 @@ ConversionResult Converter::convertMyBible(const QString &sqliteFilePath, const 
         booksConverted = groups.size();
     }
 
-    // ========== COMMENTARY ==========
+    // ========== COMMENTARY / FOOTNOTES ==========
     else if (kind == Commentary) {
-        outType = QStringLiteral("commentary");
+        // Сноски / критический аппарат (MyBible is_footnotes)
+        const QString isFootFlag = info.value(QStringLiteral("is_footnotes")).toLower();
+        const bool isFootnotes =
+            isFootFlag == QLatin1String("true") || isFootFlag == QLatin1String("1")
+            || infoType.contains(QLatin1String("footnote"))
+            || modName.contains(QString::fromUtf8("сноск"), Qt::CaseInsensitive)
+            || modName.contains(QString::fromUtf8("аппарат"), Qt::CaseInsensitive)
+            || modName.contains(QString::fromUtf8("критическ"), Qt::CaseInsensitive)
+            || detailed.contains(QString::fromUtf8("критический аппарат"), Qt::CaseInsensitive)
+            || detailed.contains(QString::fromUtf8("is_footnotes"), Qt::CaseInsensitive);
+        outType = isFootnotes ? QStringLiteral("footnotes")
+                              : QStringLiteral("commentary");
         const QString ctable = hasTable(QStringLiteral("commentaries"))
                                    ? QStringLiteral("commentaries")
                                    : QStringLiteral("commentary");
@@ -3356,6 +3424,7 @@ ConversionResult Converter::convertMyBible(const QString &sqliteFilePath, const 
         int iVT = col("verse_number_to");
         int iData = col("data");
         if (iData < 0) iData = col("text");
+        int iMarker = col("marker");
         if (iBook < 0) iBook = 0;
         if (iChF < 0) iChF = 1;
         if (iVF < 0) iVF = 2;
@@ -3377,6 +3446,18 @@ ConversionResult Converter::convertMyBible(const QString &sqliteFilePath, const 
             cr.text = q.value(iData).toString();
             if (cr.text.trimmed().isEmpty())
                 continue;
+            // Маркер сноски MyBible: [1], [t], [4]…
+            if (iMarker >= 0) {
+                QString mk = q.value(iMarker).toString().trimmed();
+                if (mk.startsWith(QLatin1Char('[')) && mk.endsWith(QLatin1Char(']')))
+                    mk = mk.mid(1, mk.size() - 2).trimmed();
+                if (!mk.isEmpty()) {
+                    cr.text = QStringLiteral(
+                        "<div class='fn' data-marker='%1'>"
+                        "<b style='color:#6a4a20'>[%1]</b> %2</div>")
+                                  .arg(mk.toHtmlEscaped(), cr.text);
+                }
+            }
             // если диапазон — пометить в тексте
             if (iChT >= 0 && iVT >= 0) {
                 const int chT = q.value(iChT).toInt();

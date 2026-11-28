@@ -334,7 +334,10 @@ bool Module::isCommentary() const
     return t.contains(QLatin1String("comment"))
         || t.contains(QString::fromUtf8("коммент"))
         || t.contains(QLatin1String("notes"))
-        || t.contains(QString::fromUtf8("толкован"));
+        || t.contains(QString::fromUtf8("толкован"))
+        || t.contains(QLatin1String("footnote"))
+        || t.contains(QString::fromUtf8("сноск"))
+        || t.contains(QLatin1String("apparatus"));
 }
 
 bool Module::openDatabase() const
@@ -592,17 +595,32 @@ static bool isMorphToken(const QString &s)
     }
     if (!hasLetter)
         return false;
-    // CONJ PREP ADV без дефиса
+    // CONJ PREP ADV ASN и т.п. без дефиса
     const QString u = s.toUpper();
     if (u == QLatin1String("CONJ") || u == QLatin1String("PREP")
         || u == QLatin1String("ADV") || u == QLatin1String("PRT")
         || u == QLatin1String("COND") || u == QLatin1String("INJ")
         || u == QLatin1String("ARAM") || u == QLatin1String("HEB")
         || u == QLatin1String("N-PRI") || u == QLatin1String("N-LI")
-        || u == QLatin1String("N-OI"))
+        || u == QLatin1String("N-OI") || u == QLatin1String("ASN")
+        || u == QLatin1String("NSN") || u == QLatin1String("NPN"))
         return true;
     // Коды вида X-YYY или V-AAI-3S
-    return hasHyphen;
+    if (hasHyphen)
+        return true;
+    // Короткий латинский морфокод ЗАГЛАВНЫМИ: ASN, DSM, NPM…
+    if (!hasDigit && s.size() >= 2 && s.size() <= 6) {
+        bool allLatinUpper = true;
+        for (QChar c : s) {
+            if (c < QLatin1Char('A') || c > QLatin1Char('Z')) {
+                allLatinUpper = false;
+                break;
+            }
+        }
+        if (allLatinUpper)
+            return true;
+    }
+    return false;
 }
 
 static bool isLatinGreekToken(const QString &s)
@@ -678,22 +696,15 @@ static bool looksLikePlainInterlinear(const QString &text)
 }
 
 static QString makeInterlinearChip(const QString &orig, const QString &gloss,
-                                   const QString &strong, const QString &morph)
+                                   const QString &strong, const QString &morph,
+                                   bool isRed = false)
 {
     QString strongFull = strong.trimmed().toUpper();
     if (!strongFull.isEmpty() && strongFull[0].isDigit()) {
-        // H для иврита, иначе G
         if (isHebrewToken(orig))
             strongFull.prepend(QLatin1Char('H'));
         else
             strongFull.prepend(QLatin1Char('G'));
-    }
-
-    // Если стронга нет — пробуем найти по форме / глоссе
-    if (strongFull.isEmpty()) {
-        const QString guessed = Module::lookupStrongByWord(orig, gloss);
-        if (!guessed.isEmpty())
-            strongFull = guessed;
     }
 
     QString title = strongFull;
@@ -706,7 +717,7 @@ static QString makeInterlinearChip(const QString &orig, const QString &gloss,
                             ? (morph.isEmpty() ? QStringLiteral("&nbsp;") : morph.toHtmlEscaped())
                             : gloss.toHtmlEscaped();
     const QString bottom = strongFull.isEmpty()
-                               ? (morph.isEmpty() ? QString() : morph.toHtmlEscaped())
+                               ? QString()
                                : strongFull.toHtmlEscaped();
 
     const QString hrefStr = QStringLiteral("w://word?g=%1&m=%2&s=%3&morph=%4")
@@ -715,31 +726,126 @@ static QString makeInterlinearChip(const QString &orig, const QString &gloss,
                                      QString::fromUtf8(QUrl::toPercentEncoding(strongFull)),
                                      QString::fromUtf8(QUrl::toPercentEncoding(morph)));
 
+    // Только одинарные кавычки в атрибутах — чтобы " в тексте не ломал HTML
     return QStringLiteral(
-               "<span style=\"display:inline-block; text-align:center; margin:0 7px 10px 0; "
-               "vertical-align:top; max-width:9em;\">"
-               "<a href=\"%1\" title=\"%2\" style=\"color:#2d6a4f; text-decoration:none; cursor:pointer;\">"
-               "<span style=\"display:block; font-size:11px; color:#5a4a3a; line-height:1.2;\">%3</span>"
-               "<span style=\"display:block; font-size:16px; line-height:1.35; color:#1a120a; "
-               "border-bottom:1px dotted #8a7a60;\">%4</span>"
-               "<span style=\"display:block; font-size:10px; color:#887; line-height:1.15;\">%5</span>"
+               "<span style='display:inline-block;text-align:center;margin:0 8px 12px 0;"
+               "vertical-align:top;max-width:12em'>"
+               "<a href='%1' title='%2' style='color:%6;text-decoration:none;cursor:pointer'>"
+               "<span style='display:block;font-size:20px;color:%7;line-height:1.35;font-weight:600'>%3</span>"
+               "<span style='display:block;font-size:18px;line-height:1.35;color:%8;"
+               "border-bottom:1px dotted #8a7a60;margin-top:2px'>%4</span>"
+               "<span style='display:block;font-size:12px;color:#6a5a4a;line-height:1.2;margin-top:1px'>%5</span>"
                "</a></span>")
         .arg(hrefStr.toHtmlEscaped(),
              title.toHtmlEscaped(),
              top,
              orig.toHtmlEscaped(),
-             bottom);
+             bottom,
+             isRed ? QStringLiteral("#b71c1c") : QStringLiteral("#2d6a4f"),
+             isRed ? QStringLiteral("#c62828") : QStringLiteral("#1a120a"),
+             isRed ? QStringLiteral("#c62828") : QStringLiteral("#1a120a"));
+}
+
+static QString splitInterlinearGlued(const QString &text)
+{
+    auto scriptOf = [](QChar c) -> int {
+        const uint u = c.unicode();
+        if ((u >= 0x0370 && u <= 0x03FF) || (u >= 0x1F00 && u <= 0x1FFF))
+            return 1; // greek
+        if ((u >= 0x0400 && u <= 0x04FF) || (u >= 0x0500 && u <= 0x052F))
+            return 2; // cyrillic
+        if ((c >= QLatin1Char('A') && c <= QLatin1Char('Z'))
+            || (c >= QLatin1Char('a') && c <= QLatin1Char('z')))
+            return 3; // latin
+        if (c.isDigit())
+            return 4;
+        return 0;
+    };
+    auto isStrongStart = [](const QString &s, int i) -> int {
+        if (i >= s.size())
+            return 0;
+        int j = i;
+        if (s[j] == QLatin1Char('G') || s[j] == QLatin1Char('g')
+            || s[j] == QLatin1Char('H') || s[j] == QLatin1Char('h'))
+            ++j;
+        if (j >= s.size() || !s[j].isDigit())
+            return 0;
+        int digits = 0;
+        while (j < s.size() && s[j].isDigit() && digits < 5) {
+            ++j;
+            ++digits;
+        }
+        if (digits < 1)
+            return 0;
+        if (j < s.size()) {
+            const QChar c = s[j].toLower();
+            if (c == QLatin1Char('a') || c == QLatin1Char('b'))
+                ++j;
+        }
+        if (s[i] != QLatin1Char('G') && s[i] != QLatin1Char('g')
+            && s[i] != QLatin1Char('H') && s[i] != QLatin1Char('h') && digits < 3)
+            return 0;
+        return j - i;
+    };
+
+    QString out;
+    out.reserve(text.size() + 128);
+    int prevScript = 0;
+    for (int i = 0; i < text.size(); ) {
+        if (text[i].isSpace()) {
+            if (out.isEmpty() || !out.endsWith(QLatin1Char(' ')))
+                out += QLatin1Char(' ');
+            prevScript = 0;
+            ++i;
+            continue;
+        }
+        // пунктуация — отделяем пробелами
+        if (text[i].isPunct() && text[i] != QLatin1Char('-') && text[i] != QLatin1Char('/')) {
+            if (!out.isEmpty() && !out.endsWith(QLatin1Char(' ')))
+                out += QLatin1Char(' ');
+            out += text[i];
+            out += QLatin1Char(' ');
+            prevScript = 0;
+            ++i;
+            continue;
+        }
+        const int slen = isStrongStart(text, i);
+        if (slen > 0) {
+            if (!out.isEmpty() && !out.endsWith(QLatin1Char(' ')))
+                out += QLatin1Char(' ');
+            out += text.mid(i, slen);
+            out += QLatin1Char(' ');
+            prevScript = 0;
+            i += slen;
+            continue;
+        }
+        const int sc = scriptOf(text[i]);
+        if (sc != 0 && prevScript != 0 && sc != prevScript) {
+            if (!out.endsWith(QLatin1Char(' ')))
+                out += QLatin1Char(' ');
+        }
+        out += text[i];
+        if (sc != 0)
+            prevScript = sc;
+        ++i;
+    }
+    return out.simplified();
 }
 
 static QString annotatePlainInterlinear(const QString &text)
 {
-    const QStringList parts = text.split(QRegularExpression(QStringLiteral("\\s+")),
-                                         Qt::SkipEmptyParts);
+    const QStringList parts = splitInterlinearGlued(text).split(
+        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     QStringList out;
     int i = 0;
     const int n = parts.size();
+    bool inRed = false;
     while (i < n) {
-        const QString &tok = parts.at(i);
+        QString tok = parts.at(i);
+        if (tok.contains(QChar(1))) { inRed = true; tok.remove(QChar(1)); }
+        bool endRed = tok.contains(QChar(2));
+        if (endRed) tok.remove(QChar(2));
+        if (tok.isEmpty()) { ++i; if (endRed) inRed = false; continue; }
         if (isOrigLangToken(tok)) {
             const QString orig = tok;
             ++i;
@@ -760,7 +866,8 @@ static QString annotatePlainInterlinear(const QString &text)
                 morph = parts.at(i);
                 ++i;
             }
-            out << makeInterlinearChip(orig, glossParts.join(QLatin1Char(' ')), strong, morph);
+            out << makeInterlinearChip(orig, glossParts.join(QLatin1Char(' ')), strong, morph, inRed);
+            if (endRed) inRed = false;
         } else {
             // пунктуация / мусор
             if (!isStrongNumToken(tok) && !isMorphToken(tok) && !isCyrillicToken(tok)) {
@@ -768,19 +875,22 @@ static QString annotatePlainInterlinear(const QString &text)
                            .arg(tok.toHtmlEscaped());
             } else if (isCyrillicToken(tok)) {
                 // кириллица без исходника — показываем как обычный текст
-                out << QStringLiteral("<span style=\"color:#5a4a3a;\">%1</span> ")
+                out << QStringLiteral("<span style=\"color:#1a120a;font-size:20px;font-weight:600;\">%1</span> ")
                            .arg(tok.toHtmlEscaped());
             }
             ++i;
         }
     }
-    return out.join(QString());
+    return QStringLiteral("<div style='font-size:19px; line-height:1.65;'>")
+        + out.join(QString())
+        + QStringLiteral("</div>");
 }
 
 static QString annotateGreek(const QString &greek)
 {
     // Формат подстрочника: ORIG¦GLOSS¦STRONG  (слова через пробел)
-    QStringList parts = greek.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    QStringList parts = splitInterlinearGlued(greek).split(
+        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     QStringList out;
     bool pipeInterlinear = false;
     for (const QString &p : parts) {
@@ -977,19 +1087,45 @@ static QString sanitizeStoredVerseHtml(QString html)
     html.replace(reIOpen, QStringLiteral("<i>"));
     html.replace(reBOpen, QStringLiteral("<b>"));
 
-    // Слова Иисуса (red letter) — inline color (QTextBrowser надежнее красит так)
-    static const QRegularExpression reWjOpen(
-        QStringLiteral("<span\\b[^>]*class\\s*=\\s*[\"']wj[\"'][^>]*>"),
+    // Слова Иисуса / красный текст (BibleQuote, MyBible)
+    static const QRegularExpression reFontRed(
+        QStringLiteral(
+            "<font\\b[^>]*\\bcolor\\s*=\\s*[\"']?\\s*"
+            "(?:#?(?:ff0000|c00000|c62828|cc0000|b71c1c|e53935|f44336|d32f2f|800000|990000|8b0000|a52a2a|b22222|dc143c|b71c1c|red)|"
+            "rgb\\s*\\(\\s*2?5?5\\s*,\\s*0\\s*,\\s*0\\s*\\))"
+            "[\"']?[^>]*>"),
         QRegularExpression::CaseInsensitiveOption);
-    html.replace(reWjOpen,
-                 QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"));
+    static const QRegularExpression reFontClose(
+        QStringLiteral("</font\\s*>"), QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reSpanRed(
+        QStringLiteral(
+            "<span\\b[^>]*style\\s*=\\s*[\"'][^\"']*\\bcolor\\s*:\\s*"
+            "(?:#?(?:ff0000|c00000|c62828|cc0000|b71c1c|e53935|f44336|d32f2f|800000|990000|8b0000|a52a2a|b22222|dc143c)|red|"
+            "rgb\\s*\\(\\s*2?5?5\\s*,\\s*0\\s*,\\s*0\\s*\\))"
+            "[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression reWjOpen(
+        QStringLiteral(
+            "<(?:span|font)\\b[^>]*class\\s*=\\s*[\"'][^\"']*"
+            "(?:\\bwj\\b|words?[-_]?of[-_]?jesus|jesus[-_]?words)"
+            "[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
 
-    // Уже сохранённые inline red-letter
+    const QString redOpen = QStringLiteral("<span style=\"color:#c62828;font-weight:500\">");
+    html.replace(reFontRed, redOpen);
+    html.replace(reSpanRed, redOpen);
+    html.replace(reWjOpen, redOpen);
+    html.replace(reFontClose, QStringLiteral("</span>"));
+
     static const QRegularExpression reWjStyleOpen(
         QStringLiteral("<span\\b[^>]*style\\s*=\\s*[\"'][^\"']*color\\s*:\\s*#?c62828[^\"']*[\"'][^>]*>"),
         QRegularExpression::CaseInsensitiveOption);
-    html.replace(reWjStyleOpen,
-                 QStringLiteral("<span style=\"color:#c62828;font-weight:500\">"));
+    html.replace(reWjStyleOpen, redOpen);
+
+    static const QRegularExpression reClassRed(
+        QStringLiteral("<(?:span|font)\\b[^>]*class\\s*=\\s*[\"'][^\"']*\\bred\\b[^\"']*[\"'][^>]*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    html.replace(reClassRed, redOpen);
 
     // Оставляем только i/b/sup/sub/a/br/span
     static const QRegularExpression reOther(
@@ -1052,7 +1188,10 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
     const bool isCommentary = m_type.toLower().contains(QLatin1String("comment"))
         || m_type.toLower().contains(QString::fromUtf8("коммент"))
         || m_type.toLower().contains(QLatin1String("dict"))
-        || m_type.toLower().contains(QString::fromUtf8("слов"));
+        || m_type.toLower().contains(QString::fromUtf8("слов"))
+        || m_type.toLower().contains(QLatin1String("footnote"))
+        || m_type.toLower().contains(QString::fromUtf8("сноск"))
+        || m_type.toLower().contains(QLatin1String("apparatus"));
 
     while (query.next()) {
         const int v = query.value(0).toInt();
@@ -1078,8 +1217,44 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
 
             QString stripped = working;
             if (stripped.contains(QLatin1Char('<'))) {
-                static const QRegularExpression reTags(QStringLiteral("<[^>]+>"));
-                stripped.replace(reTags, QStringLiteral(" "));
+                QString built;
+                built.reserve(stripped.size());
+                int i = 0;
+                int redDepth = 0;
+                while (i < stripped.size()) {
+                    if (stripped.at(i) == QLatin1Char('<')) {
+                        const int gt = stripped.indexOf(QLatin1Char('>'), i);
+                        if (gt < 0)
+                            break;
+                        const QString tag = stripped.mid(i, gt - i + 1).toLower();
+                        const bool isClose = tag.startsWith(QLatin1String("</"));
+                        const bool isRedOpen = !isClose
+                            && (tag.contains(QLatin1String("c62828"))
+                                || tag.contains(QLatin1String("wj"))
+                                || (tag.contains(QLatin1String("color"))
+                                    && (tag.contains(QLatin1String("red"))
+                                        || tag.contains(QLatin1String("ff0000"))
+                                        || tag.contains(QLatin1String("c00000")))));
+                        if (isRedOpen) {
+                            built += QChar(1);
+                            ++redDepth;
+                        } else if (isClose && redDepth > 0
+                                   && (tag.startsWith(QLatin1String("</span"))
+                                       || tag.startsWith(QLatin1String("</font")))) {
+                            built += QChar(2);
+                            --redDepth;
+                        } else {
+                            built += QLatin1Char(' ');
+                        }
+                        i = gt + 1;
+                        continue;
+                    }
+                    built += stripped.at(i);
+                    ++i;
+                }
+                stripped = built;
+            }
+            {
                 static const QRegularExpression reWs(QStringLiteral("\\s+"));
                 stripped = stripped.replace(reWs, QStringLiteral(" ")).trimmed();
             }
@@ -1130,6 +1305,35 @@ QString Module::getChapterText(int book, int chapter, const QString &highlightQu
 
         if (!highlightQuery.isEmpty())
             text = highlightSearchTerms(text, highlightQuery);
+
+        // Кликабельные сноски [1], [t], [12]… → note://marker
+        {
+            static const QRegularExpression reNote(
+                QStringLiteral(R"(\[(\d{1,3}|[A-Za-zа-яА-ЯёЁ]{1,3})\])"));
+            QString out;
+            int pos = 0;
+            auto it = reNote.globalMatch(text);
+            while (it.hasNext()) {
+                const auto m = it.next();
+                // не трогаем, если уже внутри href
+                const int from = int(m.capturedStart());
+                const QString before = text.mid(qMax(0, from - 12), 12);
+                if (before.contains(QLatin1String("href=")) || before.contains(QLatin1String("note:"))) {
+                    continue;
+                }
+                out += text.mid(pos, from - pos);
+                const QString mk = m.captured(1);
+                out += QString(
+                    QStringLiteral("<a href=\"note://%1\" style=\"color:#8B4513;font-weight:700;"
+                    "text-decoration:none;\" title=\"Сноска [%1]\">[%1]</a>")
+                    .arg(mk.toHtmlEscaped()));
+                pos = int(m.capturedEnd());
+            }
+            if (pos > 0) {
+                out += text.mid(pos);
+                text = out;
+            }
+        }
 
         if (hasOrigCol) {
             const QString orig = query.value(2).toString();
@@ -1655,6 +1859,128 @@ QString Module::lookupStrongByWord(const QString &orig, const QString &gloss)
     }
 
     return {};
+}
+
+
+QString Module::lookupFootnote(int book, int chapter, int verse, const QString &marker)
+{
+    QString mk = marker.trimmed();
+    if (mk.startsWith(QLatin1Char('[')) && mk.endsWith(QLatin1Char(']')))
+        mk = mk.mid(1, mk.size() - 2).trimmed();
+    if (mk.isEmpty() || book <= 0)
+        return {};
+
+    QStringList roots;
+    roots << QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/modules");
+    roots << QDir::homePath() + QStringLiteral("/.config/bibleapp/modules");
+    roots << QDir::homePath() + QStringLiteral("/.local/share/bibleapp/modules");
+    roots << QStringLiteral("/usr/share/bibleapp/modules");
+
+    QStringList moduleDirs;
+    for (const QString &root : roots) {
+        QDir d(root);
+        if (!d.exists())
+            continue;
+        const auto dirs = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &name : dirs)
+            moduleDirs << d.absoluteFilePath(name);
+    }
+
+    for (const QString &dir : moduleDirs) {
+        const QString jsonPath = dir + QStringLiteral("/module.json");
+        if (!QFile::exists(jsonPath))
+            continue;
+        QFile jf(jsonPath);
+        if (!jf.open(QIODevice::ReadOnly))
+            continue;
+        const QJsonDocument doc = QJsonDocument::fromJson(jf.readAll());
+        jf.close();
+        if (!doc.isObject())
+            continue;
+        const QString type = doc.object().value(QStringLiteral("type")).toString().toLower();
+        const QString name = doc.object().value(QStringLiteral("name")).toString();
+        const bool isFn =
+            type.contains(QLatin1String("footnote"))
+            || type.contains(QString::fromUtf8("сноск"))
+            || type.contains(QLatin1String("apparatus"))
+            || name.contains(QString::fromUtf8("сноск"), Qt::CaseInsensitive)
+            || name.contains(QString::fromUtf8("аппарат"), Qt::CaseInsensitive)
+            || name.contains(QString::fromUtf8("критическ"), Qt::CaseInsensitive);
+        if (!isFn)
+            continue;
+
+        const QString dbPath = dir + QStringLiteral("/data.sqlite");
+        if (!QFile::exists(dbPath))
+            continue;
+
+        const QString conn = QStringLiteral("fn_lookup_") + QUuid::createUuid().toString(QUuid::Id128);
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), conn);
+            db.setDatabaseName(dbPath);
+            db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+            if (!db.open()) {
+                QSqlDatabase::removeDatabase(conn);
+                continue;
+            }
+            QSqlQuery q(db);
+            q.prepare(QStringLiteral(
+                "SELECT text FROM verses WHERE book = ? AND chapter = ? AND verse = ? LIMIT 1"));
+            q.addBindValue(book);
+            q.addBindValue(chapter);
+            q.addBindValue(verse);
+            QString body;
+            if (q.exec() && q.next())
+                body = q.value(0).toString();
+            db.close();
+            QSqlDatabase::removeDatabase(conn);
+
+            if (body.isEmpty())
+                continue;
+
+            // Ищем блок с data-marker="mk" или заголовком [mk]
+            {
+                const QString pat = QStringLiteral(
+                    "<div\\b[^>]*data-marker\\s*=\\s*[\"']%1[\"'][^>]*>([\\s\\S]*?)</div>")
+                                        .arg(QRegularExpression::escape(mk));
+                QRegularExpression re(pat, QRegularExpression::CaseInsensitiveOption);
+                const auto m = re.match(body);
+                if (m.hasMatch()) {
+                    QString html = m.captured(0);
+                    return QString::fromUtf8(
+                        "<div style='color:#3a2a14;line-height:1.45'>"
+                        "<div style='font-size:12px;color:#6a5a40;margin-bottom:6px'>"
+                        "Сноска <b>[%1]</b> · %2</div>%3</div>")
+                        .arg(mk.toHtmlEscaped(), name.toHtmlEscaped(), html);
+                }
+            }
+            // fallback: [mk] в тексте
+            {
+                const QString needle = QStringLiteral("[%1]").arg(mk);
+                if (body.contains(needle)) {
+                    // вернуть весь стих сносок (несколько статей через <hr/>)
+                    QString html = body;
+                    return QString::fromUtf8(
+                        "<div style='color:#3a2a14;line-height:1.45'>"
+                        "<div style='font-size:12px;color:#6a5a40;margin-bottom:6px'>"
+                        "Сноска <b>[%1]</b> · %2</div>%3</div>")
+                        .arg(mk.toHtmlEscaped(), name.toHtmlEscaped(), html);
+                }
+            }
+            // если маркер один на стих или не размечен — показать весь текст стиха
+            if (body.size() > 10) {
+                return QString::fromUtf8(
+                    "<div style='color:#3a2a14;line-height:1.45'>"
+                    "<div style='font-size:12px;color:#6a5a40;margin-bottom:6px'>"
+                    "Сноска <b>[%1]</b> · %2</div>%3</div>")
+                    .arg(mk.toHtmlEscaped(), name.toHtmlEscaped(), body);
+            }
+        }
+    }
+    return QString::fromUtf8(
+        "<i>Сноска [%1] не найдена.</i><br/>"
+        "<span style='color:#666;font-size:12px'>"
+        "Установите модуль сносок (категория «Сноски») и переконвертируйте его.</span>")
+        .arg(mk.toHtmlEscaped());
 }
 
 QString Module::lookupStrongGloss(const QString &strongNum)

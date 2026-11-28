@@ -78,6 +78,8 @@ public:
     static QString lookupStrongArticle(const QString &strongNum);
     /** Подобрать номер Стронга по форме слова / русской глоссе */
     static QString lookupStrongByWord(const QString &orig, const QString &gloss);
+    /** Сноска из модулей type=footnotes: book/chapter/verse + marker (1, t, …) */
+    static QString lookupFootnote(int book, int chapter, int verse, const QString &marker);
     static QString lookupGloss(const QString &greekWord);
     static QVector<CrossRef> lookupCrossRefs(int book, int chapter, int verse);
     static QString bookAbbr(int bookId);

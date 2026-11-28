@@ -2064,6 +2064,45 @@ void BibleView::showParallelsForVerse(int book, int chapter, int verse)
 
 void BibleView::onAnchorClicked(const QUrl &url)
 {
+    // Сноски: note://1  note://t
+    {
+        const QString scheme0 = url.scheme().toLower();
+        if (scheme0 == QLatin1String("note")) {
+            QString mk = url.host();
+            if (mk.isEmpty()) {
+                mk = url.path();
+                if (mk.startsWith(QLatin1Char('/')))
+                    mk = mk.mid(1);
+            }
+            mk = QUrl::fromPercentEncoding(mk.toUtf8()).trimmed();
+            if (mk.isEmpty())
+                mk = url.toString().mid(QStringLiteral("note://").size());
+            const int book = m_currentBook;
+            const int chapter = m_currentChapter;
+            int verse = m_currentVerse;
+            if (verse <= 0)
+                verse = 1;
+            QString html = Module::lookupFootnote(book, chapter, verse, mk);
+            html.replace(QStringLiteral("%COLOR_RED%"), QStringLiteral("#c62828"));
+            html.replace(QStringLiteral("%COLOR_BLUE%"), QStringLiteral("#1565c0"));
+            html.replace(QStringLiteral("%COLOR_BLACK%"), QStringLiteral("#1a120a"));
+            html.replace(QLatin1String("class='grcuncial'"),
+                         QLatin1String("style='color:#c62828;font-family:serif'"));
+            html.replace(QLatin1String("class=\"grcuncial\""),
+                         QLatin1String("style='color:#c62828;font-family:serif'"));
+            html.replace(QLatin1String("class='grc'"),
+                         QLatin1String("style='color:#c62828;font-family:serif'"));
+            html.replace(QLatin1String("class=\"grc\""),
+                         QLatin1String("style='color:#c62828;font-family:serif'"));
+            html.replace(QLatin1String("class='casrc'"),
+                         QLatin1String("style='color:#333;font-weight:600'"));
+            html.replace(QLatin1String("class=\"casrc\""),
+                         QLatin1String("style='color:#333;font-weight:600'"));
+            showWordInfo(html);
+            return;
+        }
+    }
+
     // Ссылки симфонии/MyBible: mbible:book/chapter/verse  или  B:book chapter:verse
     const QString scheme = url.scheme().toLower();
     if (scheme == QLatin1String("mbible") || scheme == QLatin1String("b")) {
